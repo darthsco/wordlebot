@@ -7,6 +7,7 @@ dependencies = [
     "discord.py>=2.6",
     "aiohttp>=3.9",
     "python-dotenv>=1.0",
+    "tzdata",  # zoneinfo database for slim container images
 ]
 
 [project.optional-dependencies]

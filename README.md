@@ -75,7 +75,21 @@ Every setting is documented in [`config.example.toml`](config.example.toml).
 .venv/bin/python -m wordlebot        # start the bot
 ```
 
-The bot has to keep running to post on schedule. Run it under a process manager such as systemd, launchd, Docker, or a small VPS. If it's offline at post time, it posts as soon as it comes back.
+The bot has to keep running to post on schedule. Run it under a process manager such as systemd or launchd, or with Docker (below). If it's offline at post time, it posts as soon as it comes back.
+
+### Running with Docker
+
+Create `.env` and `config.toml` as in step 2, then:
+
+```sh
+docker compose up -d --build
+docker compose logs -f                      # follow logs
+docker compose run --rm wordlebot pick      # dry run inside the container
+```
+
+- `config.toml` is mounted read-only, so after editing it run `docker compose restart`.
+- The SQLite database (solution cache, starters, scores) lives in the `wordlebot-state` named volume. It survives rebuilds and `docker compose down`, but `down -v` deletes it.
+- Inside the container, `WORDLEBOT_DATABASE_PATH` overrides `database_path` in `config.toml`, so you don't need to change it for Docker.
 
 ## Development
 

@@ -49,3 +49,7 @@ A share's first grid row must equal `feedback(starter, solution)`. Status lifecy
 - Slash commands sync to `discord.guild_id` only (instant updates; no global commands).
 - Slash command output goes by DM, falling back to an ephemeral reply when DMs are closed. The daily channel post carries the previous puzzle's results plus the new starter.
 - If the bot starts after `post_time` with no starter saved for the target date, `on_ready` posts it immediately. `tasks.loop` dies on an unhandled exception, so `_daily_post` catches everything.
+
+## Deployment
+
+`Dockerfile` + `compose.yaml`. Env overrides: `WORDLEBOT_CONFIG` (config path) and `WORDLEBOT_DATABASE_PATH` (beats `[storage].database_path`); the image sets both so state lands in the `/app/state` volume. `tzdata` is a dependency because slim images ship no zoneinfo database.

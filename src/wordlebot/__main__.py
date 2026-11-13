@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 
 import aiohttp
 from dotenv import load_dotenv
@@ -54,11 +55,11 @@ async def _run(config_path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="wordlebot")
-    parser.add_argument("--config", default="config.toml")
+    parser.add_argument("--config", default=os.environ.get("WORDLEBOT_CONFIG", "config.toml"))
     parser.add_argument("command", nargs="?", default="run", choices=["run", "sync", "pick"])
+    load_dotenv()
     args = parser.parse_args()
 
-    load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if args.command == "run":
         asyncio.run(_run(args.config))

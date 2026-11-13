@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import date, time
 from pathlib import Path
 from typing import Any
@@ -119,6 +119,10 @@ def load_config(path: str | Path = "config.toml") -> Config:
         sections[f.name] = _build(section_cls, raw.pop(f.name, {}))
     if raw:
         raise ValueError(f"Unknown config sections: {sorted(raw)}")
+
+    # Deployment overrides (e.g. a container volume) without editing config.toml.
+    if db_path := os.environ.get("WORDLEBOT_DATABASE_PATH"):
+        sections["storage"] = replace(sections["storage"], database_path=db_path)
 
     config = Config(**sections, token=os.environ.get("DISCORD_TOKEN", ""))
     validate(config)
