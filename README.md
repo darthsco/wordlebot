@@ -91,6 +91,15 @@ docker compose run --rm wordlebot pick      # dry run inside the container
 - The SQLite database (solution cache, starters, scores) lives in the `wordlebot-state` named volume. It survives rebuilds and `docker compose down`, but `down -v` deletes it.
 - Inside the container, `WORDLEBOT_DATABASE_PATH` overrides `database_path` in `config.toml`, so you don't need to change it for Docker.
 
+#### Updating
+
+```sh
+./update.sh          # pull; if there are new commits, rebuild, restart and confirm the bot logged in
+./update.sh --force  # rebuild and restart even with no new commits
+```
+
+Because it does nothing when there are no new commits, it's safe to run on a timer (cron or a systemd timer). If you only edited `config.toml`, run `docker compose restart`. If you changed `.env`, run `docker compose up -d --force-recreate`.
+
 ## Development
 
 ```sh
