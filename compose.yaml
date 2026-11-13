@@ -3,9 +3,22 @@ services:
     build: .
     image: wordlebot
     restart: unless-stopped
+    # Python is PID 1 and has no SIGTERM handler, so the kernel drops Docker's
+    # default stop signal and the container gets SIGKILLed after the grace
+    # period. SIGINT raises KeyboardInterrupt instead: asyncio.run cancels the
+    # main task and `async with bot:` closes the gateway session (main() exits 0).
+    # The image declares STOPSIGNAL SIGINT too; this keeps it explicit.
+    stop_signal: SIGINT
     env_file: .env
     volumes:
-      - ./config.toml:/app/config.toml:ro
+      # Long syntax so a missing config.toml is an error instead of Docker
+      # creating a root-owned directory at that path.
+      - type: bind
+        source: ./config.toml
+        target: /app/config.toml
+        read_only: true
+        bind:
+          create_host_path: false
       - wordlebot-state:/app/state
     logging:
       driver: json-file

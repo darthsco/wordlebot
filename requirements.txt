@@ -1,0 +1,26 @@
+# Exact runtime pins for the container image (Python 3.13, Linux), including
+# transitive dependencies. The Dockerfile installs these, then installs
+# wordlebot itself with --no-deps, so an unattended rebuild never picks up a
+# new release. pyproject.toml keeps the loose ranges; keep the two in step
+# when adding or removing a dependency.
+#
+# Regenerate (resolves the ranges in pyproject.toml inside the image's base):
+#
+#   docker run --rm -v "$PWD/pyproject.toml:/src/pyproject.toml:ro" python:3.13-slim sh -c '
+#     python -c "import tomllib; print(\"\n\".join(tomllib.load(open(\"/src/pyproject.toml\", \"rb\"))[\"project\"][\"dependencies\"]))" > /tmp/deps.txt &&
+#     pip install -q --disable-pip-version-check --root-user-action=ignore -r /tmp/deps.txt && pip freeze'
+#
+# then replace the pins below with the output, rebuild, and run the bot.
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.5
+aiosignal==1.4.0
+attrs==26.1.0
+audioop-lts==0.2.2
+discord.py==2.7.1
+frozenlist==1.8.0
+idna==3.20
+multidict==7.2.1
+propcache==0.5.4
+python-dotenv==1.2.4
+tzdata==2026.6
+yarl==1.25.1

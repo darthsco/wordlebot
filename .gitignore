@@ -7,3 +7,5 @@ config.toml
 *.sqlite3
 *.sqlite3-*
 *.egg-info/
+.deployed-sha
+.deploy-pending
