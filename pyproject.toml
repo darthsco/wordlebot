@@ -1,0 +1,27 @@
+[project]
+name = "wordlebot"
+version = "0.1.0"
+description = "Discord bot that posts a shared daily Wordle starting word and tracks scores"
+requires-python = ">=3.12"
+dependencies = [
+    "discord.py>=2.6",
+    "aiohttp>=3.9",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+wordlebot = "wordlebot.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

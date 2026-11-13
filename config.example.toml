@@ -1,0 +1,46 @@
+# Copy to config.toml and edit. The bot token lives in .env (DISCORD_TOKEN), not here.
+
+[discord]
+guild_id = 0              # server ID; slash commands are synced to this guild
+channel_id = 0            # channel for daily posts and score submissions
+admin_role_ids = []       # roles allowed to use /reroll (members with Manage Server always can)
+
+[schedule]
+timezone = "America/New_York"
+post_time = "20:00"       # HH:MM, local to `timezone`
+target_offset_days = 1    # starter is for the puzzle this many days after the post date
+post_daily_results = true # include the just-finished puzzle's results in the daily post
+
+[game]
+word_length = 5           # only 5 is supported by the NYT solution source today
+max_guesses = 6
+fail_score = 7            # score assigned to X/6 for averages
+
+[selection]
+# random_answer_like | random_all_valid | weighted_quality | varied
+strategy = "random_answer_like"
+# Exclusion windows in days. 0 disables the exclusion; -1 means "all time".
+exclude_own_starters_days = 180
+exclude_solutions_days = 365
+# Never suggest the target puzzle's own solution (checked privately, never stored early).
+avoid_target_solution = true
+# weighted_quality: higher = stronger bias toward high-scoring openers.
+quality_weight_exponent = 2.0
+# varied: chance of picking from the weakest openers instead of the strongest.
+varied_bad_chance = 0.3
+varied_pool_fraction = 0.2
+
+[scores]
+# Only verified scores (first row matches the shared starter) count on leaderboards.
+count_unverified = false
+weekly_window_days = 7
+min_games_all_time = 5    # minimum games to appear on the all-time board
+
+[storage]
+database_path = "wordlebot.sqlite3"
+words_dir = "data/words"
+
+[solutions]
+base_url = "https://www.nytimes.com/svc/wordle/v2"
+launch_date = "2021-06-19" # puzzle #0
+fetch_concurrency = 8
