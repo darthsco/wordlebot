@@ -98,7 +98,58 @@ docker compose run --rm wordlebot pick      # dry run inside the container
 ./update.sh --force  # rebuild and restart even with no new commits
 ```
 
-Because it does nothing when there are no new commits, it's safe to run on a timer (cron or a systemd timer). If you only edited `config.toml`, run `docker compose restart`. If you changed `.env`, run `docker compose up -d --force-recreate`.
+If you only edited `config.toml`, run `docker compose restart`. If you changed `.env`, run `docker compose up -d --force-recreate`.
+
+#### Automatic updates (systemd timer)
+
+`update.sh` does nothing when there are no new commits, so it's safe to run on a schedule. On a systemd-based Linux host such as Debian, run these from the wordlebot folder **as your normal user**. They fill in your username and the folder path automatically:
+
+```sh
+sudo tee /etc/systemd/system/wordlebot-update.service >/dev/null <<EOF
+[Unit]
+Description=Pull and redeploy wordlebot
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=$USER
+WorkingDirectory=$PWD
+ExecStart=$PWD/update.sh
+EOF
+
+sudo tee /etc/systemd/system/wordlebot-update.timer >/dev/null <<EOF
+[Unit]
+Description=Check for wordlebot updates every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now wordlebot-update.timer
+```
+
+Check it:
+
+```sh
+systemctl list-timers wordlebot-update.timer    # next run
+sudo systemctl start wordlebot-update.service   # run once now
+journalctl -u wordlebot-update.service -n 20    # what it did
+```
+
+Before relying on it:
+
+- **`git pull` must work without a prompt.** For a private repo, set up an SSH key without a passphrase or a saved credential. Test it by running `git pull` by hand.
+- **Your user must be in the `docker` group**, because the timer runs `update.sh` as you, without `sudo`.
+- **Avoid pushing right around the daily post time.** A restart in the moment between posting the starter and saving it can cause a duplicate post.
+
+To check less often, change `OnCalendar` (for example, `hourly`) and run `sudo systemctl daemon-reload`. To turn it off, run `sudo systemctl disable --now wordlebot-update.timer`.
 
 ## Development
 
