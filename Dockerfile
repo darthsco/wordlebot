@@ -26,6 +26,10 @@ RUN pip install --no-deps . && pip check
 
 COPY data ./data
 
+# Last, so a new commit only rebuilds this layer. update.sh passes the SHA.
+ARG GIT_COMMIT=unknown
+ENV WORDLEBOT_COMMIT=$GIT_COMMIT
+
 USER wordlebot
 VOLUME ["/app/state"]
 

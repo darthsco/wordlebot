@@ -86,6 +86,7 @@ Competition ranking (1, 2, 2, 4), decided on lower average, then more games; a t
 
 - Env overrides: `WORDLEBOT_CONFIG` (config path) and `WORDLEBOT_DATABASE_PATH` (beats `[storage].database_path`); the image sets both so state lands in the `/app/state` volume.
 - The image installs runtime deps from `requirements.txt` (exact pins including transitives, resolved inside `python:3.13-slim`), then `pip install --no-deps .` and `pip check`, so timer rebuilds never pull new releases. A dependency change goes in `pyproject.toml` (loose range) **and** `requirements.txt`; the regeneration command is in that file's header.
+- `/version` reports `WORDLEBOT_COMMIT`, baked in by `update.sh` → compose build arg `GIT_COMMIT` → `ENV` in the image's last layer (the image has no `.git`). Since the SHA is in the image, every commit changes it, so `update.sh` recreates the container even for docs-only commits.
 - `tzdata` is a dependency because slim images ship no zoneinfo database.
 - Stop signal is SIGINT (`STOPSIGNAL` in the image, repeated in compose): Python as PID 1 ignores SIGTERM. `main()` catches the `KeyboardInterrupt`, logs "Shutting down" and exits 0.
 - The `config.toml` bind mount uses `create_host_path: false`, so a missing file is an error instead of a root-owned directory.

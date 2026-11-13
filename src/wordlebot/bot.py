@@ -26,6 +26,7 @@ from discord.ext import tasks
 from .config import Config
 from .scores import MISMATCH, NO_STARTER, PENDING, VERIFIED
 from .service import PuzzleInPlay, SubmissionsExist, WordleService
+from .version import version_info
 
 log = logging.getLogger(__name__)
 
@@ -312,6 +313,11 @@ class WordleBot(discord.Client):
                 for section, values in cfg.items()
             )
             await self._dm(interaction, f"```toml\n{body}\n```")
+
+        @tree.command(description="Show which version of the bot is running")
+        @self._deferred
+        async def version(interaction: discord.Interaction) -> None:
+            await self._dm(interaction, version_info())
 
         @tree.command(description="(Admin) Pick and post a new upcoming starting word")
         @self._deferred

@@ -39,6 +39,7 @@ The bot sends replies by DM. If your DMs are closed, the reply appears only to y
 | `/leaderboard <weekly\|monthly\|all-time>` | Standings |
 | `/history [count]` | Our recent starters (default 10, up to 100). Answers appear behind spoiler tags 2 days after each puzzle |
 | `/config` | The bot's current settings |
+| `/version` | Which version and commit of the bot is running |
 | `/reroll` | **Admin only:** pick and post a new upcoming starter |
 
 `/reroll` is for members with **Manage Server** or a role listed in `admin_role_ids`. It is refused once the starter's puzzle has started or anyone has submitted a result for it, so it never works with `target_offset_days = 0`, where the starter is for a puzzle that is already live. It never picks a word that date has already had. Its confirmation is shown only to you instead of by DM.

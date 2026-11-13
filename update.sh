@@ -56,7 +56,7 @@ up_args=(-d --build)
 before=$(running_id)
 touch "$pending_file"
 started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-docker compose up "${up_args[@]}"
+GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up "${up_args[@]}"
 docker image prune -f >/dev/null
 after=$(running_id)
 

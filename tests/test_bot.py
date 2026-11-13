@@ -317,6 +317,7 @@ COMMANDS = [
     ("leaderboard", SimpleNamespace(value="weekly")),
     ("history", 10),
     ("config",),
+    ("version",),
     ("reroll",),
 ]
 
@@ -339,6 +340,7 @@ def test_command_options_survive_the_defer_wrapper(tmp_path):
         "leaderboard": ["period"],
         "history": ["count"],
         "config": [],
+        "version": [],
         "reroll": [],
     }
 
@@ -403,3 +405,12 @@ def test_bot_messages_cannot_ping_anyone(tmp_path):
         False,
         False,
     )
+
+
+def test_version_command_dms_the_running_commit(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORDLEBOT_COMMIT", "abc1234")
+    bot, _, _ = make_bot(tmp_path)
+    interaction = invoke(bot, "version")
+    assert interaction.events == ["defer", "dm", "followup"]
+    assert "commit `abc1234`" in interaction.user.dms[0]
+    assert "discord.py" in interaction.user.dms[0]

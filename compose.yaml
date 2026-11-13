@@ -1,6 +1,9 @@
 services:
   wordlebot:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}  # shown by /version; set by update.sh
     image: wordlebot
     restart: unless-stopped
     # Python is PID 1 and has no SIGTERM handler, so the kernel drops Docker's
