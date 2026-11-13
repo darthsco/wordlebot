@@ -1,12 +1,22 @@
-"""Discord layer: daily scheduled post, score intake, and slash commands.
+"""Discord layer: the posting loop, score intake, and slash commands.
+
+There is no timer aimed at the post time. A short-interval loop asks the service
+what the channel is owed and sends it, so a missed or failed post is made up on a
+later tick and nothing is posted twice.
 
 Slash command output is delivered by DM (with an ephemeral fallback if the user's
-DMs are closed) so leaderboards don't clutter the channel.
+DMs are closed) so leaderboards don't clutter the channel. Every command defers
+its interaction before doing anything else: Discord drops an interaction that is
+not acknowledged within 3 seconds, while a deferred one can be answered with
+followups for 15 minutes.
 """
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 
 import discord
@@ -15,13 +25,29 @@ from discord.ext import tasks
 
 from .config import Config
 from .scores import MISMATCH, NO_STARTER, PENDING, VERIFIED
-from .service import WordleService
+from .service import PuzzleInPlay, SubmissionsExist, WordleService
 
 log = logging.getLogger(__name__)
 
 DISCORD_LIMIT = 2000
 STATUS_REACTIONS = {VERIFIED: "✅", PENDING: "⏳", MISMATCH: "❌", NO_STARTER: "➖"}
 DUPLICATE_REACTION = "🔁"
+RECONCILE_SECONDS = 60  # also the retry delay after a failed post
+# How long a report command waits for a missing solution before answering with
+# what is cached. Commands defer first, so this is about the user's patience, not
+# Discord's 3-second acknowledgement deadline.
+REPORT_REFRESH_SECONDS = 10
+COMMAND_FAILED = "Something went wrong; see the bot's log."
+REROLL_IN_PLAY = (
+    "Not rerolling: with `target_offset_days = 0` the starter is for today's puzzle, "
+    "which is already live, so members may have opened with it. "
+    "A starter can only be rerolled before its puzzle starts."
+)
+
+REROLL_HAS_SUBMISSIONS = (
+    "Not rerolling: {count} submission(s) already exist for Wordle {puzzle:,}, "
+    "and changing the starter now would invalidate them."
+)
 
 
 def chunks(text: str, limit: int = DISCORD_LIMIT) -> list[str]:
@@ -36,23 +62,22 @@ def chunks(text: str, limit: int = DISCORD_LIMIT) -> list[str]:
     return out
 
 
-def starter_announcement(word: str, puzzle_number: int, target: object) -> str:
-    return (
-        f"🟩 **Starting word for Wordle {puzzle_number:,}** ({target:%A, %B %d}):\n"
-        f"# `{word.upper()}`\n"
-        "Open with this word, then paste your share result here to be counted."
-    )
-
-
 class WordleBot(discord.Client):
     def __init__(self, config: Config, service: WordleService) -> None:
         intents = discord.Intents.default()
         intents.message_content = True  # privileged: enable in the Developer Portal
-        super().__init__(intents=intents)
+        # Nothing the bot sends is meant to ping anyone, and its posts echo
+        # member-chosen display names. A message that should ping must pass its
+        # own allowed_mentions at the call site.
+        super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
         self.config = config
         self.service = service
         self.tree = app_commands.CommandTree(self)
-        self.daily_post = tasks.loop(time=config.schedule.post_time_local)(self._daily_post)
+        # Serializes everything that picks or announces a starter (the loop, /reroll).
+        self._post_lock = asyncio.Lock()
+        self._background: set[asyncio.Task[None]] = set()  # keeps tasks referenced
+        self.reconcile = tasks.loop(seconds=RECONCILE_SECONDS)(self._reconcile)
+        self.reconcile.before_loop(self.wait_until_ready)
         self._register_commands()
 
     # --- lifecycle -------------------------------------------------------
@@ -61,72 +86,119 @@ class WordleBot(discord.Client):
         guild = discord.Object(id=self.config.discord.guild_id)
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
-        self.daily_post.start()
+        self.reconcile.start()
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s", self.user)
-        await self.service.refresh()
-        if self.service.post_is_due():
-            log.info("Missed today's post; posting now")
-            await self._daily_post()
-
-    async def channel(self) -> discord.abc.Messageable:
-        channel = self.get_channel(self.config.discord.channel_id)
-        if channel is None:
-            channel = await self.fetch_channel(self.config.discord.channel_id)
-        return channel  # type: ignore[return-value]
-
-    # --- daily post ------------------------------------------------------
-
-    async def _daily_post(self) -> None:
-        # An unhandled exception would stop the tasks.loop for good, so log and move on.
         try:
-            await self._post_daily()
-        except Exception:
-            log.exception("Daily post failed")
-
-    async def _post_daily(self) -> None:
-        try:
-            await self.service.refresh()
+            async with self._post_lock:
+                await self.service.refresh()
         except Exception:
             log.exception("Solution refresh failed; continuing with cached data")
+        await self._update_reactions()
 
+    async def channel(self, channel_id: int | None = None) -> discord.abc.Messageable:
+        """The channel with `channel_id`; by default the configured one."""
+        channel_id = channel_id or self.config.discord.channel_id
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            channel = await self.fetch_channel(channel_id)
+        return channel  # type: ignore[return-value]
+
+    async def _send(self, text: str) -> int:
+        """Post `text` to the channel, split to fit; returns the last message's id."""
         channel = await self.channel()
-        if self.config.schedule.post_daily_results:
-            for part in chunks(self.service.daily_results()):
-                await channel.send(part)
+        for part in chunks(text):
+            message = await channel.send(part)
+        return message.id
 
-        target = self.service.target_date()
-        if existing := self.service.db.starter_for_date(target):
-            # Already picked earlier (e.g. /reroll), so remind instead of picking again.
-            await channel.send(
-                "⏰ **REMINDER** "
-                + starter_announcement(existing.word, existing.puzzle_number, target)
-            )
-            log.info("Starter for %s already posted; sent reminder", target)
-            return
-        starter = await self.service.choose_starter(target)
-        message = await channel.send(
-            starter_announcement(starter.word, starter.puzzle_number, starter.target_date)
-        )
-        self.service.db.save_starter(starter, message.id)
-        log.info("Posted starter %s for %s", starter.word, target)
+    # --- posting loop ----------------------------------------------------
+
+    async def _reconcile(self) -> None:
+        # An unhandled exception would stop the tasks.loop for good, so log it and
+        # let the next tick retry.
+        try:
+            await self._tick()
+        except Exception:
+            log.exception("Posting failed; will retry")
+
+    async def _tick(self) -> None:
+        try:
+            # Picks up today's solution shortly after local midnight, so shares
+            # pasted before the evening post can be verified.
+            await self.service.refresh_if_missing()
+            async with self._post_lock:
+                await self.service.post_due(self._send)
+        finally:
+            await self._update_reactions()
+
+    # --- reactions -------------------------------------------------------
+
+    async def _update_reactions(self) -> None:
+        """Swap ⏳ for the outcome on every share that was verified since last time."""
+        for score in self.service.take_resolved():
+            if score.channel_id is None or score.message_id is None:
+                continue  # stored before submissions recorded their message
+            try:
+                channel = await self.channel(score.channel_id)
+                message = channel.get_partial_message(score.message_id)  # type: ignore[attr-defined]
+            except Exception:
+                log.warning("Could not find message %s to update its reaction", score.message_id)
+                continue
+            # Separate attempts: the new reaction is worth adding even if the old
+            # one can't be removed. A deleted message or missing permission fails both.
+            try:
+                await message.remove_reaction(STATUS_REACTIONS[PENDING], self.user)
+            except discord.HTTPException:
+                log.warning("Could not remove the pending reaction on %s", score.message_id)
+            try:
+                await message.add_reaction(STATUS_REACTIONS[score.status])
+            except discord.HTTPException:
+                log.warning("Could not react to message %s", score.message_id)
+
+    async def _refresh_for_report(self) -> None:
+        """Give a missing solution a moment to arrive before a report is built.
+
+        The refresh carries on in the background if it is slow, and the report is
+        built from what is cached.
+        """
+
+        async def refresh() -> None:
+            await self.service.refresh_if_missing()
+            await self._update_reactions()
+
+        task = asyncio.create_task(refresh())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        try:
+            await asyncio.wait_for(asyncio.shield(task), REPORT_REFRESH_SECONDS)
+        except asyncio.TimeoutError:
+            log.info("Solution refresh still running; reporting from cached data")
+        except Exception:
+            log.exception("Solution refresh failed; reporting from cached data")
 
     # --- score intake ----------------------------------------------------
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or message.channel.id != self.config.discord.channel_id:
             return
-        submission = self.service.submit(
-            message.author.id, message.author.display_name, message.content
+        submission = await self.service.submit(
+            message.author.id,
+            message.author.display_name,
+            message.content,
+            message.channel.id,
+            message.id,
         )
-        if submission is None:
-            return
-        emoji = STATUS_REACTIONS[submission.status] if submission.inserted else DUPLICATE_REACTION
-        try:
-            await message.add_reaction(emoji)
-        except discord.HTTPException:
-            log.warning("Could not react to message %s", message.id)
+        if submission is not None:
+            emoji = (
+                STATUS_REACTIONS[submission.status] if submission.inserted else DUPLICATE_REACTION
+            )
+            try:
+                await message.add_reaction(emoji)
+            except discord.HTTPException:
+                log.warning("Could not react to message %s", message.id)
+        # Submitting may have fetched a solution that settles earlier shares too.
+        await self._update_reactions()
 
     # --- slash commands --------------------------------------------------
 
@@ -139,32 +211,67 @@ class WordleBot(discord.Client):
         return any(r.id in self.config.discord.admin_role_ids for r in member.roles)
 
     async def _dm(self, interaction: discord.Interaction, text: str) -> None:
-        """Send `text` to the invoking user by DM; fall back to an ephemeral reply."""
+        """Send `text` to the invoking user by DM; fall back to ephemeral followups.
+
+        The interaction must already be deferred (see `_deferred`).
+        """
+        parts = chunks(text)
         try:
-            for part in chunks(text):
+            for part in parts:
                 await interaction.user.send(part)
-            await interaction.response.send_message("Sent you a DM. 📬", ephemeral=True)
         except discord.Forbidden:
-            parts = chunks(text)
-            await interaction.response.send_message(parts[0], ephemeral=True)
-            for part in parts[1:]:
+            for part in parts:
                 await interaction.followup.send(part, ephemeral=True)
+            return
+        await interaction.followup.send("Sent you a DM. 📬", ephemeral=True)
+
+    def _deferred(
+        self, callback: Callable[..., Awaitable[None]]
+    ) -> Callable[..., Awaitable[None]]:
+        """Wrap a slash command: acknowledge at once, and report a failure.
+
+        The body must answer through `interaction.followup` only; a second
+        `interaction.response` call would raise InteractionResponded.
+        """
+
+        @functools.wraps(callback)  # discord.py reads the options off the signature
+        async def wrapper(interaction: discord.Interaction, *args: object, **kwargs: object) -> None:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            try:
+                await callback(interaction, *args, **kwargs)
+            except Exception:
+                # Without a followup the user would watch "thinking…" until it expires.
+                log.exception("Command /%s failed", callback.__name__)
+                try:
+                    await interaction.followup.send(COMMAND_FAILED, ephemeral=True)
+                except discord.HTTPException:
+                    log.warning("Could not report the failure of /%s", callback.__name__)
+
+        return wrapper
 
     def _register_commands(self) -> None:
         tree, service = self.tree, self.service
 
         @tree.command(description="Show today's and the upcoming starting word")
+        @self._deferred
         async def starter(interaction: discord.Interaction) -> None:
             lines = []
-            if current := service.current_starter():
+            today = service.today()  # one reading, so both lines agree on the date
+            if current := service.current_starter(today):
                 lines.append(f"Today (#{current.puzzle_number:,}): `{current.word.upper()}`")
-            if upcoming := service.upcoming_starter():
+            if upcoming := service.upcoming_starter(today):
                 lines.append(f"Next (#{upcoming.puzzle_number:,}): `{upcoming.word.upper()}`")
             await self._dm(interaction, "\n".join(lines) or "No starter posted yet.")
 
-        @tree.command(description="Results for one puzzle (defaults to today's)")
-        @app_commands.describe(puzzle="Wordle puzzle number")
+        @tree.command(
+            description="Results for one puzzle (default: the one the daily post reports on)"
+        )
+        @app_commands.describe(
+            puzzle="Wordle puzzle number (default: the puzzle before the next starter's)"
+        )
+        @self._deferred
         async def results(interaction: discord.Interaction, puzzle: int | None = None) -> None:
+            await self._refresh_for_report()
             await self._dm(interaction, service.daily_results(puzzle))
 
         @tree.command(description="Standings for a period")
@@ -175,6 +282,7 @@ class WordleBot(discord.Client):
                 app_commands.Choice(name="all-time", value="all_time"),
             ]
         )
+        @self._deferred
         async def leaderboard(
             interaction: discord.Interaction, period: app_commands.Choice[str]
         ) -> None:
@@ -183,16 +291,19 @@ class WordleBot(discord.Client):
                 "monthly": service.monthly,
                 "all_time": service.all_time,
             }[period.value]
+            await self._refresh_for_report()
             await self._dm(interaction, report())
 
         @tree.command(description="Our recent starting words")
         @app_commands.describe(count="How many to show (default 10)")
+        @self._deferred
         async def history(
             interaction: discord.Interaction, count: app_commands.Range[int, 1, 100] = 10
         ) -> None:
             await self._dm(interaction, service.history(count))
 
         @tree.command(description="Show the bot's configuration")
+        @self._deferred
         async def config(interaction: discord.Interaction) -> None:
             cfg = asdict(self.config)
             cfg.pop("token", None)
@@ -203,24 +314,28 @@ class WordleBot(discord.Client):
             await self._dm(interaction, f"```toml\n{body}\n```")
 
         @tree.command(description="(Admin) Pick and post a new upcoming starting word")
+        @self._deferred
         async def reroll(interaction: discord.Interaction) -> None:
             if not self._is_admin(interaction):
-                await interaction.response.send_message("Admins only.", ephemeral=True)
+                await interaction.followup.send("Admins only.", ephemeral=True)
                 return
-            target = service.target_date()
-            previous = service.db.starter_for_date(target)
-            if target <= service.today():
-                await interaction.response.send_message(
-                    "That puzzle is already in play; not rerolling.", ephemeral=True
+            try:
+                async with self._post_lock:
+                    starter = await service.reroll(self._send)
+            except PuzzleInPlay:
+                await interaction.followup.send(REROLL_IN_PLAY, ephemeral=True)
+                return
+            except SubmissionsExist as refused:
+                await interaction.followup.send(
+                    REROLL_HAS_SUBMISSIONS.format(
+                        count=refused.count, puzzle=refused.puzzle_number
+                    ),
+                    ephemeral=True,
                 )
                 return
-            await interaction.response.defer(ephemeral=True)
-            exclude = {previous.word} if previous else set()
-            starter = await service.choose_starter(target, exclude)
-            channel = await self.channel()
-            message = await channel.send(
-                "🔁 **Rerolled!** "
-                + starter_announcement(starter.word, starter.puzzle_number, target)
-            )
-            service.db.save_starter(starter, message.id)
+            except Exception:
+                # A pick that was saved but not sent is announced by the posting loop.
+                log.exception("Reroll failed")
+                await interaction.followup.send("Reroll failed; see the log.", ephemeral=True)
+                return
             await interaction.followup.send(f"Rerolled to `{starter.word.upper()}`.", ephemeral=True)

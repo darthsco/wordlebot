@@ -25,7 +25,22 @@ CREATE TABLE IF NOT EXISTS starters (
     word          TEXT NOT NULL,
     strategy      TEXT NOT NULL,
     posted_at     TEXT NOT NULL,
-    message_id    INTEGER
+    message_id    INTEGER           -- NULL means picked but not announced yet
+);
+
+-- One row per scheduled daily post, keyed by the date its starter is for.
+CREATE TABLE IF NOT EXISTS daily_posts (
+    target_date   TEXT PRIMARY KEY,
+    results_at    TEXT,             -- when the results part was sent
+    completed_at  TEXT              -- when the starter (or reminder) was sent
+);
+
+-- Words a date's starter was rerolled away from, so a later reroll can't bring
+-- one back. Members may already have seen (or opened with) any of them.
+CREATE TABLE IF NOT EXISTS retired_starters (
+    target_date   TEXT NOT NULL,
+    word          TEXT NOT NULL,
+    PRIMARY KEY (target_date, word)
 );
 
 CREATE TABLE IF NOT EXISTS scores (
@@ -37,6 +52,8 @@ CREATE TABLE IF NOT EXISTS scores (
     grid          TEXT NOT NULL,    -- rows of marks, e.g. "apaac\\nccccc"
     status        TEXT NOT NULL,    -- pending | verified | mismatch | no_starter
     submitted_at  TEXT NOT NULL,
+    channel_id    INTEGER,          -- where the share was pasted; NULL for rows
+    message_id    INTEGER,          -- from before these columns existed
     PRIMARY KEY (puzzle_number, user_id)
 );
 CREATE INDEX IF NOT EXISTS scores_status ON scores(status);
@@ -49,6 +66,11 @@ class Starter:
     puzzle_number: int
     word: str
     strategy: str
+    message_id: int | None = None
+
+    @property
+    def announced(self) -> bool:
+        return self.message_id is not None
 
 
 @dataclass(frozen=True)
@@ -60,6 +82,11 @@ class Score:
     hard_mode: bool
     grid: str
     status: str
+    # The Discord message the share was pasted in, so its reaction can be updated.
+    channel_id: int | None = None
+    message_id: int | None = None
+    # UTC ISO timestamp, set by the database on insert when left empty.
+    submitted_at: str = ""
 
 
 def _now() -> str:
@@ -71,7 +98,41 @@ class Database:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        upgrading = self._has_table("starters") and not self._has_table("daily_posts")
         self.conn.executescript(SCHEMA)
+        if upgrading:
+            self._backfill_daily_posts()
+        self._add_score_message_columns()
+
+    def _has_table(self, name: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone()
+        return row is not None
+
+    def _backfill_daily_posts(self) -> None:
+        """Migrate a database from before `daily_posts` existed.
+
+        Every starter that reached the channel is taken to have had its daily post,
+        so upgrading after post time doesn't repeat today's results and starter.
+        """
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO daily_posts "
+                "SELECT target_date, posted_at, posted_at FROM starters "
+                "WHERE message_id IS NOT NULL"
+            )
+
+    def _add_score_message_columns(self) -> None:
+        """Migrate a `scores` table from before submissions recorded their message.
+
+        Existing rows keep NULL ids, so their reactions are simply never updated.
+        """
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(scores)")}
+        with self.conn:
+            for column in ("channel_id", "message_id"):
+                if column not in columns:
+                    self.conn.execute(f"ALTER TABLE scores ADD COLUMN {column} INTEGER")
 
     def close(self) -> None:
         self.conn.close()
@@ -113,8 +174,38 @@ class Database:
 
     # --- starters --------------------------------------------------------
 
-    def save_starter(self, starter: Starter, message_id: int | None = None) -> None:
+    def add_starter(self, starter: Starter) -> Starter:
+        """Persist a pick, not yet announced, unless the date already has one.
+
+        Returns the stored starter, which is the earlier pick if there was one, so
+        a date can never end up with two different words.
+        """
         with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO starters VALUES (?, ?, ?, ?, ?, NULL)",
+                (
+                    starter.target_date.isoformat(),
+                    starter.puzzle_number,
+                    starter.word,
+                    starter.strategy,
+                    _now(),
+                ),
+            )
+        stored = self.starter_for_date(starter.target_date)
+        assert stored is not None
+        return stored
+
+    def save_starter(self, starter: Starter, message_id: int | None = None) -> None:
+        """Insert or replace (a reroll). `message_id=None` means not announced yet.
+
+        A different word being replaced is kept in the `retired_starters` table.
+        """
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO retired_starters "
+                "SELECT target_date, word FROM starters WHERE target_date = ? AND word != ?",
+                (starter.target_date.isoformat(), starter.word),
+            )
             self.conn.execute(
                 "INSERT OR REPLACE INTO starters VALUES (?, ?, ?, ?, ?, ?)",
                 (
@@ -127,6 +218,23 @@ class Database:
                 ),
             )
 
+    def mark_announced(self, target: date, message_id: int, daily_post: bool = False) -> None:
+        """Record that the starter reached the channel; `daily_post` also completes that."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE starters SET message_id = ? WHERE target_date = ?",
+                (message_id, target.isoformat()),
+            )
+            if daily_post:
+                self._stamp_daily_post(target, "completed_at")
+
+    def retired_words(self, target: date) -> set[str]:
+        """Every word the starter for `target` was rerolled away from."""
+        rows = self.conn.execute(
+            "SELECT word FROM retired_starters WHERE target_date = ?", (target.isoformat(),)
+        )
+        return {r[0] for r in rows}
+
     def starter_for_date(self, target: date) -> Starter | None:
         row = self.conn.execute(
             "SELECT * FROM starters WHERE target_date = ?", (target.isoformat(),)
@@ -138,6 +246,11 @@ class Database:
             "SELECT * FROM starters WHERE puzzle_number = ?", (puzzle_number,)
         ).fetchone()
         return self._starter(row) if row else None
+
+    def first_starter_date(self) -> date | None:
+        """The earliest date we ever picked a starter for; None if there is none."""
+        row = self.conn.execute("SELECT MIN(target_date) FROM starters").fetchone()
+        return date.fromisoformat(row[0]) if row[0] else None
 
     def starters_between(self, start: date | None, end: date) -> list[Starter]:
         if start is None:
@@ -159,7 +272,37 @@ class Database:
             puzzle_number=row["puzzle_number"],
             word=row["word"],
             strategy=row["strategy"],
+            message_id=row["message_id"],
         )
+
+    # --- daily posts -----------------------------------------------------
+
+    def _stamp_daily_post(self, target: date, column: str) -> None:
+        self.conn.execute(
+            f"INSERT INTO daily_posts (target_date, {column}) VALUES (?, ?) "
+            f"ON CONFLICT(target_date) DO UPDATE SET {column} = excluded.{column}",
+            (target.isoformat(), _now()),
+        )
+
+    def mark_results_posted(self, target: date) -> None:
+        with self.conn:
+            self._stamp_daily_post(target, "results_at")
+
+    def mark_daily_post_completed(self, target: date) -> None:
+        with self.conn:
+            self._stamp_daily_post(target, "completed_at")
+
+    def _daily_post_stamp(self, target: date, column: str) -> str | None:
+        row = self.conn.execute(
+            f"SELECT {column} FROM daily_posts WHERE target_date = ?", (target.isoformat(),)
+        ).fetchone()
+        return row[0] if row else None
+
+    def results_posted(self, target: date) -> bool:
+        return self._daily_post_stamp(target, "results_at") is not None
+
+    def daily_post_completed(self, target: date) -> bool:
+        return self._daily_post_stamp(target, "completed_at") is not None
 
     # --- scores ----------------------------------------------------------
 
@@ -167,7 +310,9 @@ class Database:
         """Insert a score. Returns False if the user already submitted for that puzzle."""
         with self.conn:
             cur = self.conn.execute(
-                "INSERT OR IGNORE INTO scores VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO scores (puzzle_number, user_id, user_name, guesses,"
+                " hard_mode, grid, status, submitted_at, channel_id, message_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     score.puzzle_number,
                     score.user_id,
@@ -176,7 +321,9 @@ class Database:
                     int(score.hard_mode),
                     score.grid,
                     score.status,
-                    _now(),
+                    score.submitted_at or _now(),
+                    score.channel_id,
+                    score.message_id,
                 ),
             )
         return cur.rowcount == 1
@@ -192,10 +339,20 @@ class Database:
         rows = self.conn.execute("SELECT * FROM scores WHERE status = ?", (status,))
         return [self._score(r) for r in rows]
 
+    def score_count(self, puzzle_number: int) -> int:
+        """How many members have submitted for a puzzle, whatever the status."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM scores WHERE puzzle_number = ?", (puzzle_number,)
+        ).fetchone()
+        return row[0]
+
     def scores_between(self, first_puzzle: int | None, last_puzzle: int) -> list[Score]:
+        """Scores for a range of puzzles, oldest submission first."""
         lo = first_puzzle if first_puzzle is not None else 0
         rows = self.conn.execute(
-            "SELECT * FROM scores WHERE puzzle_number BETWEEN ? AND ?", (lo, last_puzzle)
+            "SELECT * FROM scores WHERE puzzle_number BETWEEN ? AND ? "
+            "ORDER BY submitted_at, rowid",
+            (lo, last_puzzle),
         )
         return [self._score(r) for r in rows]
 
@@ -209,4 +366,7 @@ class Database:
             hard_mode=bool(row["hard_mode"]),
             grid=row["grid"],
             status=row["status"],
+            channel_id=row["channel_id"],
+            message_id=row["message_id"],
+            submitted_at=row["submitted_at"],
         )
