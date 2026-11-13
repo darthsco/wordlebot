@@ -12,13 +12,11 @@ from collections import Counter
 from collections.abc import Iterable
 from datetime import date, timedelta
 
-from .config import ALL_TIME, SelectionConfig
+from .config import ALL_TIME, STRATEGIES, SelectionConfig  # noqa: F401 (re-exported)
 from .db import Database
 from .words import WordLists
 
 log = logging.getLogger(__name__)
-
-STRATEGIES = ("random_answer_like", "random_all_valid", "weighted_quality", "varied")
 
 
 def quality_scores(pool: Iterable[str], reference: Iterable[str]) -> dict[str, float]:

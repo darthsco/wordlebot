@@ -16,15 +16,14 @@ import os
 import aiohttp
 from dotenv import load_dotenv
 
-from .config import load_config
+from .config import Config, load_config
 from .db import Database
 from .service import WordleService
 from .solutions import NytSolutionSource
 from .words import WordLists
 
 
-async def _offline(command: str, config_path: str) -> None:
-    config = load_config(config_path)
+async def _offline(command: str, config: Config) -> None:
     db = Database(config.storage.database_path)
     lists = WordLists.load(config.storage.words_dir, config.game.word_length)
     async with aiohttp.ClientSession() as session:
@@ -38,10 +37,9 @@ async def _offline(command: str, config_path: str) -> None:
     db.close()
 
 
-async def _run(config_path: str) -> None:
+async def _run(config: Config) -> None:
     from .bot import WordleBot
 
-    config = load_config(config_path)
     if not config.token:
         raise SystemExit("DISCORD_TOKEN is not set (see .env.example)")
     db = Database(config.storage.database_path)
@@ -61,10 +59,21 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    if args.command == "run":
-        asyncio.run(_run(args.config))
-    else:
-        asyncio.run(_offline(args.command, args.config))
+    # Only `run` needs the config file and Discord IDs; sync/pick work from defaults.
+    try:
+        config = load_config(args.config, for_run=args.command == "run")
+    except ValueError as exc:  # includes tomllib.TOMLDecodeError
+        raise SystemExit(f"{args.config}: {exc}") from None
+    try:
+        if args.command == "run":
+            asyncio.run(_run(config))
+        else:
+            asyncio.run(_offline(args.command, config))
+    except KeyboardInterrupt:
+        # Ctrl-C, or `docker stop` (the image's stop signal is SIGINT). By now
+        # asyncio.run has cancelled the main task and `async with bot:` has
+        # closed the gateway session, so this is a clean stop: exit 0, no traceback.
+        logging.getLogger("wordlebot").info("Shutting down")
 
 
 if __name__ == "__main__":
