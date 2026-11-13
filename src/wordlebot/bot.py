@@ -97,8 +97,13 @@ class WordleBot(discord.Client):
                 await channel.send(part)
 
         target = self.service.target_date()
-        if self.service.db.starter_for_date(target) is not None:
-            log.info("Starter for %s already posted", target)
+        if existing := self.service.db.starter_for_date(target):
+            # Already picked earlier (e.g. /reroll), so remind instead of picking again.
+            await channel.send(
+                "⏰ **REMINDER** "
+                + starter_announcement(existing.word, existing.puzzle_number, target)
+            )
+            log.info("Starter for %s already posted; sent reminder", target)
             return
         starter = await self.service.choose_starter(target)
         message = await channel.send(

@@ -48,7 +48,7 @@ A share's first grid row must equal `feedback(starter, solution)`. Status lifecy
 - The **Message Content** privileged intent must be enabled in the Developer Portal, or score intake silently sees empty messages.
 - Slash commands sync to `discord.guild_id` only (instant updates; no global commands).
 - Slash command output goes by DM, falling back to an ephemeral reply when DMs are closed. The daily channel post carries the previous puzzle's results plus the new starter.
-- If the bot starts after `post_time` with no starter saved for the target date, `on_ready` posts it immediately. `tasks.loop` dies on an unhandled exception, so `_daily_post` catches everything.
+- If the starter for the target date already exists at `post_time` (e.g. from `/reroll`), the daily post sends a REMINDER of it instead of picking a new one. If the bot starts after `post_time` with no starter saved, `on_ready` posts it immediately. `tasks.loop` dies on an unhandled exception, so `_daily_post` catches everything.
 
 ## Deployment
 
