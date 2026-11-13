@@ -187,3 +187,7 @@ To change the schedule, edit the `OnCalendar` line in `/etc/systemd/system/wordl
 ## Credits
 
 The word lists in `data/words/` are the original Wordle answer and allowed-guess lists. Daily solutions come from the New York Times Wordle endpoint. This project is not affiliated with the NYT.
+
+## License
+
+The code is released under the [MIT License](LICENSE). The word lists in `data/words/` come from the original Wordle game and are not covered by that license.
