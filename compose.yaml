@@ -7,6 +7,11 @@ services:
     volumes:
       - ./config.toml:/app/config.toml:ro
       - wordlebot-state:/app/state
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   wordlebot-state:
