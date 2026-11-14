@@ -191,3 +191,35 @@ def test_run_command_reports_invalid_values(tmp_path, monkeypatch):
 def test_minimum_games_defaults():
     scores = Config().scores
     assert (scores.min_games_weekly, scores.min_games_monthly, scores.min_games_all_time) == (3, 7, 5)
+
+
+def test_overrides_layer_over_the_file_and_are_validated():
+    from wordlebot.config import parse_value, with_overrides
+
+    base = Config()
+    config = with_overrides(base, {("scores", "min_games_weekly"): 2, ("discord", "admin_role_ids"): [5, 6]})
+    assert config.scores.min_games_weekly == 2
+    assert config.discord.admin_role_ids == (5, 6)
+    # A key that isn't editable (any more) is ignored, not applied.
+    assert with_overrides(base, {("discord", "guild_id"): 9}) == base
+    with pytest.raises(ValueError, match="fail_score must be greater"):
+        with_overrides(base, {("game", "fail_score"): 6})
+
+    assert parse_value("schedule", "post_daily_results", " False ") is False
+    assert parse_value("selection", "varied_bad_chance", "0.5") == 0.5
+    assert parse_value("discord", "admin_role_ids", "1, 2 3") == (1, 2, 3)
+    assert parse_value("discord", "admin_role_ids", "") == ()
+    assert parse_value("schedule", "post_time", " 21:30 ") == "21:30"
+    for section, key, text in [
+        ("scores", "min_games_weekly", "two"),
+        ("schedule", "post_daily_results", "yes"),
+        ("selection", "varied_bad_chance", "nan"),
+        ("schedule", "timezone", "UTC"),  # not editable
+    ]:
+        with pytest.raises(ValueError):
+            parse_value(section, key, text)
+
+
+def test_web_host_can_be_set_from_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORDLEBOT_WEB_HOST", "0.0.0.0")
+    assert load_config(tmp_path / "nope.toml").web.host == "0.0.0.0"

@@ -86,6 +86,27 @@ class SolutionsConfig:
 
 
 @dataclass(frozen=True)
+class WebConfig:
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8080
+    session_hours: int = 12
+    session_idle_minutes: int = 60
+    login_max_failures: int = 5
+    login_lockout_minutes: int = 15
+
+
+@dataclass(frozen=True)
+class AnnounceConfig:
+    reroll: bool = False
+    score_delete: bool = False
+    score_restore: bool = False
+    score_override: bool = False
+    score_add: bool = False
+    config_change: bool = False
+
+
+@dataclass(frozen=True)
 class Config:
     discord: DiscordConfig = field(default_factory=DiscordConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
@@ -94,6 +115,8 @@ class Config:
     scores: ScoresConfig = field(default_factory=ScoresConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     solutions: SolutionsConfig = field(default_factory=SolutionsConfig)
+    web: WebConfig = field(default_factory=WebConfig)
+    announce: AnnounceConfig = field(default_factory=AnnounceConfig)
     token: str = field(default="", repr=False)
 
 
@@ -142,6 +165,8 @@ def load_config(path: str | Path = "config.toml", *, for_run: bool = False) -> C
     # Deployment overrides (e.g. a container volume) without editing config.toml.
     if db_path := os.environ.get("WORDLEBOT_DATABASE_PATH"):
         sections["storage"] = replace(sections["storage"], database_path=db_path)
+    if web_host := os.environ.get("WORDLEBOT_WEB_HOST"):
+        sections["web"] = replace(sections["web"], host=web_host)
 
     config = Config(**sections, token=os.environ.get("DISCORD_TOKEN", ""))
     validate(config, for_run=for_run)
@@ -221,6 +246,14 @@ _RULES: dict[str, dict[str, Rule]] = {
         "base_url": _NON_EMPTY,
         "launch_date": (_is_iso_date, "must be a YYYY-MM-DD date"),
         "fetch_concurrency": _at_least(1),
+    },
+    "web": {
+        "host": _NON_EMPTY,
+        "port": (lambda v: 1 <= v <= 65535, "must be between 1 and 65535"),
+        "session_hours": _at_least(1),
+        "session_idle_minutes": _at_least(1),
+        "login_max_failures": _at_least(1),
+        "login_lockout_minutes": _at_least(1),
     },
 }
 
@@ -303,3 +336,74 @@ def validate(config: Config, *, for_run: bool = False) -> None:
         raise ValueError(f"Invalid config: {errors[0]}")
     if errors:
         raise ValueError("Invalid config:\n" + "\n".join(f"  - {e}" for e in errors))
+
+
+# --- panel overrides --------------------------------------------------------------------
+#
+# The admin panel stores edited settings as overrides in the database, layered over the
+# file. Only keys that can change while the bot runs are editable: the rest (which
+# guild and channel, the timezone dates are stored in, game rules scores were parsed
+# with, paths, the solution source, the panel itself) need config.toml and a restart.
+
+EDITABLE: dict[str, tuple[str, ...]] = {
+    "discord": ("admin_role_ids",),
+    "schedule": ("post_time", "target_offset_days", "post_daily_results"),
+    "game": ("fail_score",),
+    "selection": tuple(f.name for f in fields(SelectionConfig)),
+    "scores": tuple(f.name for f in fields(ScoresConfig)),
+    "announce": tuple(f.name for f in fields(AnnounceConfig)),
+}
+
+Overrides = dict[tuple[str, str], Any]  # (section, key) -> value
+
+
+def is_editable(section: str, key: str) -> bool:
+    return key in EDITABLE.get(section, ())
+
+
+def with_overrides(config: Config, overrides: Overrides) -> Config:
+    """`config` with `overrides` applied, then validated (raises ValueError).
+
+    Overrides for keys that are no longer editable are ignored, so a key moved out of
+    `EDITABLE` by an upgrade falls back to the file.
+    """
+    by_section: dict[str, dict[str, Any]] = {}
+    for (section, key), value in overrides.items():
+        if is_editable(section, key):
+            by_section.setdefault(section, {})[key] = tuple(value) if isinstance(value, list) else value
+    changed = {
+        section: replace(getattr(config, section), **values) for section, values in by_section.items()
+    }
+    result = replace(config, **changed)
+    validate(result)
+    return result
+
+
+def parse_value(section: str, key: str, text: str) -> Any:
+    """Convert a value typed into the panel to the key's type (raises ValueError).
+
+    Only the type is checked here; `with_overrides` applies the value rules.
+    """
+    if not is_editable(section, key):
+        raise ValueError(f"[{section}] {key} can't be edited in the panel")
+    section_cls = type(getattr(Config(), section))
+    hint = get_type_hints(section_cls)[key]
+    text = text.strip()
+    try:
+        if hint is bool:
+            if text.lower() not in ("true", "false"):
+                raise ValueError
+            return text.lower() == "true"
+        if hint is int:
+            return int(text)
+        if hint is float:
+            value = float(text)
+            if not math.isfinite(value):
+                raise ValueError
+            return value
+        if get_origin(hint) is tuple:
+            parts = [p for p in re.split(r"[\s,]+", text) if p]
+            return tuple(int(p) for p in parts)
+    except ValueError:
+        raise ValueError(f"[{section}] {key} must be {_expected(hint)}, got {text!r}") from None
+    return text

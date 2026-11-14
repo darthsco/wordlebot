@@ -50,3 +50,25 @@ words_dir = "data/words"
 base_url = "https://www.nytimes.com/svc/wordle/v2"
 launch_date = "2021-06-19" # puzzle #0
 fetch_concurrency = 8      # parallel requests during backfill; at least 1
+
+[web]
+# Admin panel: a web app served by the bot, reached over HTTPS through the Caddy
+# reverse proxy in compose.yaml (see README). Plain HTTP requests that didn't come
+# through the proxy are refused. Create an admin with `python -m wordlebot admin add NAME`.
+enabled = false
+host = "127.0.0.1"        # listen address; the Docker image overrides it (WORDLEBOT_WEB_HOST)
+port = 8080               # 1 to 65535; never publish it, only the proxy should reach it
+session_hours = 12        # a login lasts at most this long (at least 1)
+session_idle_minutes = 60 # ...and ends after this long without a request (at least 1)
+login_max_failures = 5    # failed logins per username or address before a lockout (at least 1)
+login_lockout_minutes = 15
+
+[announce]
+# Post a note in the channel when an admin does one of these in the panel.
+# A reroll always posts the new word; this adds who-did-it context to it.
+reroll = false
+score_delete = false
+score_restore = false
+score_override = false
+score_add = false
+config_change = false

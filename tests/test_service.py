@@ -20,6 +20,7 @@ from wordlebot.service import (
     DuePost,
     PuzzleInPlay,
     SubmissionsExist,
+    Actor,
     WordleService,
 )
 from wordlebot.words import WordLists
@@ -815,3 +816,39 @@ def test_scores_come_back_oldest_submission_first_and_keep_their_time(tmp_path):
     assert [s.user_id for s in rows] == [1, 3, 2, 4]
     assert rows[0].submitted_at == "2026-11-12T09:00:00+00:00"
     assert rows[3].submitted_at > "2026-11-13T09:00:00+00:00"
+
+
+def test_stored_overrides_apply_at_startup_unless_they_no_longer_validate(tmp_path):
+    service, _, _ = make(tmp_path)
+    service.db.set_config_override("scores", "min_games_weekly", 2, "ada")
+    service.load_overrides()
+    assert service.config.scores.min_games_weekly == 2 and service.overrides_error is None
+
+    # config.toml changed so an override is now invalid: run on the file, say why.
+    service.db.set_config_override("game", "fail_score", 6, "ada")
+    service.load_overrides()
+    assert service.config == service.file_config
+    assert "fail_score" in service.overrides_error
+
+
+def test_admin_actions_are_announced_only_when_enabled(tmp_path):
+    service, _, channel = make_morning(tmp_path)
+    submit(service, 1, GOOD_SHARE)
+    actor = Actor("ada <@1>")
+
+    asyncio.run(service.set_config("scores", "min_games_weekly", "2", actor, channel.send))
+    edit = service.plan_override(12, 1, MISMATCH)
+    asyncio.run(service.apply_edit(edit, actor, "testing", channel.send))
+    assert channel.sent == []
+
+    asyncio.run(service.set_config("announce", "config_change", "true", actor, channel.send))
+    asyncio.run(service.set_config("announce", "score_override", "true", actor, channel.send))
+    assert channel.sent == []  # toggling announcements isn't itself announced
+    asyncio.run(service.set_config("scores", "min_games_weekly", "4", actor, channel.send))
+    asyncio.run(service.apply_edit(service.plan_reverify(12, 1), actor, "undo", channel.send))
+    assert len(channel.sent) == 2
+    assert "min_games_weekly" in channel.sent[0]
+    assert "Changed user1's score for Wordle 12 to verified" in channel.sent[1]
+    assert "<@1>" not in channel.sent[1]  # the admin's name is escaped
+    # The reason is for the audit log, not the channel.
+    assert "undo" not in channel.sent[1]

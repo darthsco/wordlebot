@@ -6,8 +6,9 @@ Queries are small and fast, so this uses the synchronous stdlib driver directly.
 
 from __future__ import annotations
 
+import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -59,6 +60,72 @@ CREATE TABLE IF NOT EXISTS scores (
     PRIMARY KEY (puzzle_number, user_id)
 );
 CREATE INDEX IF NOT EXISTS scores_status ON scores(status);
+
+-- Admin panel. Passwords are scrypt hashes (see auth.py); the TOTP secret is
+-- set at first login and confirmed by a code before it is enabled.
+CREATE TABLE IF NOT EXISTS admins (
+    username      TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    totp_secret   TEXT,
+    totp_enabled  INTEGER NOT NULL DEFAULT 0,
+    totp_last_step INTEGER,         -- the last accepted code's time step, against replay
+    created_at    TEXT NOT NULL
+);
+
+-- Only a hash of the session token is stored, so a copy of the database can't log in.
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash    TEXT PRIMARY KEY,
+    username      TEXT NOT NULL,
+    stage         TEXT NOT NULL,    -- totp | enroll | full
+    csrf_token    TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    last_seen_at  TEXT NOT NULL
+);
+
+-- Failed logins, keyed "user:<name>" or "ip:<address>", for rate limiting.
+CREATE TABLE IF NOT EXISTS login_failures (
+    key           TEXT NOT NULL,
+    at            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS login_failures_key ON login_failures(key, at);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    at            TEXT NOT NULL,
+    actor         TEXT NOT NULL,    -- panel username, or "cli"
+    action        TEXT NOT NULL,
+    detail        TEXT NOT NULL,
+    reason        TEXT NOT NULL DEFAULT '',
+    address       TEXT NOT NULL DEFAULT ''
+);
+
+-- Settings edited in the panel, layered over config.toml (values are JSON).
+CREATE TABLE IF NOT EXISTS config_overrides (
+    section       TEXT NOT NULL,
+    key           TEXT NOT NULL,
+    value         TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    updated_by    TEXT NOT NULL,
+    PRIMARY KEY (section, key)
+);
+
+-- Scores removed in the panel, kept so they can be restored.
+CREATE TABLE IF NOT EXISTS deleted_scores (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    puzzle_number INTEGER NOT NULL,
+    user_id       INTEGER NOT NULL,
+    user_name     TEXT NOT NULL,
+    guesses       INTEGER,
+    hard_mode     INTEGER NOT NULL,
+    grid          TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    submitted_at  TEXT NOT NULL,
+    channel_id    INTEGER,
+    message_id    INTEGER,
+    deleted_at    TEXT NOT NULL,
+    deleted_by    TEXT NOT NULL,
+    reason        TEXT NOT NULL
+);
 """
 
 
@@ -89,6 +156,44 @@ class Score:
     message_id: int | None = None
     # UTC ISO timestamp, set by the database on insert when left empty.
     submitted_at: str = ""
+
+
+@dataclass(frozen=True)
+class Admin:
+    username: str
+    password_hash: str
+    totp_secret: str | None
+    totp_enabled: bool
+    totp_last_step: int | None
+
+
+@dataclass(frozen=True)
+class Session:
+    username: str
+    stage: str
+    csrf_token: str
+    created_at: str
+    last_seen_at: str
+
+
+@dataclass(frozen=True)
+class AuditEntry:
+    id: int
+    at: str
+    actor: str
+    action: str
+    detail: str
+    reason: str
+    address: str
+
+
+@dataclass(frozen=True)
+class DeletedScore:
+    id: int
+    score: Score
+    deleted_at: str
+    deleted_by: str
+    reason: str
 
 
 def _now() -> str:
@@ -319,24 +424,7 @@ class Database:
     def add_score(self, score: Score) -> bool:
         """Insert a score. Returns False if the user already submitted for that puzzle."""
         with self.conn:
-            cur = self.conn.execute(
-                "INSERT OR IGNORE INTO scores (puzzle_number, user_id, user_name, guesses,"
-                " hard_mode, grid, status, submitted_at, channel_id, message_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    score.puzzle_number,
-                    score.user_id,
-                    score.user_name,
-                    score.guesses,
-                    int(score.hard_mode),
-                    score.grid,
-                    score.status,
-                    score.submitted_at or _now(),
-                    score.channel_id,
-                    score.message_id,
-                ),
-            )
-        return cur.rowcount == 1
+            return self._insert_score(score)
 
     def set_score_status(self, puzzle_number: int, user_id: int, status: str) -> None:
         with self.conn:
@@ -380,3 +468,247 @@ class Database:
             message_id=row["message_id"],
             submitted_at=row["submitted_at"],
         )
+
+    def score_for(self, puzzle_number: int, user_id: int) -> Score | None:
+        row = self.conn.execute(
+            "SELECT * FROM scores WHERE puzzle_number = ? AND user_id = ?", (puzzle_number, user_id)
+        ).fetchone()
+        return self._score(row) if row else None
+
+    def scores_for_puzzle(self, puzzle_number: int) -> list[Score]:
+        return self.scores_between(puzzle_number, puzzle_number)
+
+    def scores_for_user(self, user_id: int, limit: int = 100) -> list[Score]:
+        rows = self.conn.execute(
+            "SELECT * FROM scores WHERE user_id = ? ORDER BY puzzle_number DESC LIMIT ?",
+            (user_id, limit),
+        )
+        return [self._score(r) for r in rows]
+
+    def players(self) -> list[tuple[int, str, int]]:
+        """(user_id, latest name, number of scores) for everyone who ever submitted."""
+        rows = self.conn.execute(
+            "SELECT user_id, user_name, COUNT(*) OVER (PARTITION BY user_id) AS n, "
+            "ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY submitted_at DESC, rowid DESC) AS r "
+            "FROM scores"
+        )
+        found = [(r["user_id"], r["user_name"], r["n"]) for r in rows if r["r"] == 1]
+        return sorted(found, key=lambda p: p[1].lower())
+
+    def delete_score(self, puzzle_number: int, user_id: int, by: str, reason: str) -> Score | None:
+        """Move a score to `deleted_scores`; returns it, or None if there was none."""
+        score = self.score_for(puzzle_number, user_id)
+        if score is None:
+            return None
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO deleted_scores (puzzle_number, user_id, user_name, guesses, hard_mode,"
+                " grid, status, submitted_at, channel_id, message_id, deleted_at, deleted_by, reason)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    score.puzzle_number, score.user_id, score.user_name, score.guesses,
+                    int(score.hard_mode), score.grid, score.status, score.submitted_at,
+                    score.channel_id, score.message_id, _now(), by, reason,
+                ),
+            )
+            self.conn.execute(
+                "DELETE FROM scores WHERE puzzle_number = ? AND user_id = ?", (puzzle_number, user_id)
+            )
+        return score
+
+    def deleted_scores(self, limit: int = 100) -> list[DeletedScore]:
+        rows = self.conn.execute("SELECT * FROM deleted_scores ORDER BY id DESC LIMIT ?", (limit,))
+        return [self._deleted(r) for r in rows]
+
+    def deleted_score(self, deleted_id: int) -> DeletedScore | None:
+        row = self.conn.execute("SELECT * FROM deleted_scores WHERE id = ?", (deleted_id,)).fetchone()
+        return self._deleted(row) if row else None
+
+    def restore_score(self, deleted_id: int, status: str) -> bool:
+        """Put a deleted score back with `status`. False if the member has a score for
+        that puzzle again (they resubmitted), or the deleted row is gone."""
+        deleted = self.deleted_score(deleted_id)
+        if deleted is None:
+            return False
+        with self.conn:
+            if not self._insert_score(replace(deleted.score, status=status)):
+                return False
+            self.conn.execute("DELETE FROM deleted_scores WHERE id = ?", (deleted_id,))
+        return True
+
+    def _insert_score(self, score: Score) -> bool:
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO scores (puzzle_number, user_id, user_name, guesses,"
+            " hard_mode, grid, status, submitted_at, channel_id, message_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                score.puzzle_number, score.user_id, score.user_name, score.guesses,
+                int(score.hard_mode), score.grid, score.status, score.submitted_at or _now(),
+                score.channel_id, score.message_id,
+            ),
+        )
+        return cur.rowcount == 1
+
+    def _deleted(self, row: sqlite3.Row) -> DeletedScore:
+        return DeletedScore(row["id"], self._score(row), row["deleted_at"], row["deleted_by"], row["reason"])
+
+    # --- admin panel: accounts and sessions -------------------------------
+
+    def add_admin(self, username: str, password_hash: str) -> bool:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO admins (username, password_hash, created_at) VALUES (?, ?, ?)",
+                (username, password_hash, _now()),
+            )
+        return cur.rowcount == 1
+
+    def admin(self, username: str) -> Admin | None:
+        row = self.conn.execute("SELECT * FROM admins WHERE username = ?", (username,)).fetchone()
+        if row is None:
+            return None
+        return Admin(
+            row["username"], row["password_hash"], row["totp_secret"],
+            bool(row["totp_enabled"]), row["totp_last_step"],
+        )
+
+    def admin_names(self) -> list[str]:
+        return [r[0] for r in self.conn.execute("SELECT username FROM admins ORDER BY username")]
+
+    def set_admin_password(self, username: str, password_hash: str) -> bool:
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE admins SET password_hash = ? WHERE username = ?", (password_hash, username)
+            )
+        return cur.rowcount == 1
+
+    def set_admin_totp(self, username: str, secret: str | None, enabled: bool) -> bool:
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE admins SET totp_secret = ?, totp_enabled = ?, totp_last_step = NULL "
+                "WHERE username = ?",
+                (secret, int(enabled), username),
+            )
+        return cur.rowcount == 1
+
+    def use_totp_step(self, username: str, step: int) -> bool:
+        """Record `step` as used; False if it (or a later one) was used already."""
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE admins SET totp_last_step = ? WHERE username = ? "
+                "AND (totp_last_step IS NULL OR totp_last_step < ?)",
+                (step, username, step),
+            )
+        return cur.rowcount == 1
+
+    def remove_admin(self, username: str) -> bool:
+        with self.conn:
+            cur = self.conn.execute("DELETE FROM admins WHERE username = ?", (username,))
+            self.conn.execute("DELETE FROM sessions WHERE username = ?", (username,))
+        return cur.rowcount == 1
+
+    def add_session(self, token_hash: str, username: str, stage: str, csrf: str, now: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)",
+                (token_hash, username, stage, csrf, now, now),
+            )
+
+    def session(self, token_hash: str) -> Session | None:
+        row = self.conn.execute("SELECT * FROM sessions WHERE token_hash = ?", (token_hash,)).fetchone()
+        if row is None:
+            return None
+        return Session(row["username"], row["stage"], row["csrf_token"], row["created_at"], row["last_seen_at"])
+
+    def touch_session(self, token_hash: str, now: str) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?", (now, token_hash))
+
+    def delete_session(self, token_hash: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+
+    def delete_sessions(self, username: str, keep: str | None = None) -> int:
+        """End every session of `username`, except the one with token hash `keep`."""
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM sessions WHERE username = ? AND token_hash IS NOT ?", (username, keep)
+            )
+        return cur.rowcount
+
+    def delete_sessions_before(self, created_before: str, seen_before: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM sessions WHERE created_at < ? OR last_seen_at < ?",
+                (created_before, seen_before),
+            )
+
+    def add_login_failure(self, keys: list[str], now: str) -> None:
+        with self.conn:
+            self.conn.executemany("INSERT INTO login_failures VALUES (?, ?)", [(k, now) for k in keys])
+
+    def login_failures_since(self, key: str, since: str) -> list[str]:
+        """Timestamps of failures for `key` at or after `since`, oldest first."""
+        rows = self.conn.execute(
+            "SELECT at FROM login_failures WHERE key = ? AND at >= ? ORDER BY at", (key, since)
+        )
+        return [r[0] for r in rows]
+
+    def clear_login_failures(self, keys: list[str], before: str | None = None) -> None:
+        """Forget the failures for `keys` (all of them, or only those before `before`)."""
+        with self.conn:
+            for key in keys:
+                if before is None:
+                    self.conn.execute("DELETE FROM login_failures WHERE key = ?", (key,))
+                else:
+                    self.conn.execute(
+                        "DELETE FROM login_failures WHERE key = ? AND at < ?", (key, before)
+                    )
+
+    def prune_login_failures(self, before: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM login_failures WHERE at < ?", (before,))
+
+    # --- admin panel: audit log and config overrides ------------------------
+
+    def audit(self, actor: str, action: str, detail: str, reason: str = "", address: str = "") -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO audit_log (at, actor, action, detail, reason, address)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (_now(), actor, action, detail, reason, address),
+            )
+
+    def audit_entries(self, limit: int = 200, before_id: int | None = None) -> list[AuditEntry]:
+        rows = self.conn.execute(
+            "SELECT * FROM audit_log WHERE id < ? ORDER BY id DESC LIMIT ?",
+            (before_id if before_id is not None else 2**62, limit),
+        )
+        return [
+            AuditEntry(r["id"], r["at"], r["actor"], r["action"], r["detail"], r["reason"], r["address"])
+            for r in rows
+        ]
+
+    def config_overrides(self) -> dict[tuple[str, str], object]:
+        rows = self.conn.execute("SELECT section, key, value FROM config_overrides")
+        return {(r["section"], r["key"]): json.loads(r["value"]) for r in rows}
+
+    def config_override_meta(self) -> dict[tuple[str, str], tuple[str, str]]:
+        """(section, key) -> (updated_at, updated_by)."""
+        rows = self.conn.execute("SELECT section, key, updated_at, updated_by FROM config_overrides")
+        return {(r["section"], r["key"]): (r["updated_at"], r["updated_by"]) for r in rows}
+
+    def set_config_override(self, section: str, key: str, value: object, by: str) -> None:
+        if isinstance(value, tuple):
+            value = list(value)
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO config_overrides VALUES (?, ?, ?, ?, ?)",
+                (section, key, json.dumps(value), _now(), by),
+            )
+
+    def delete_config_override(self, section: str, key: str) -> bool:
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM config_overrides WHERE section = ? AND key = ?", (section, key)
+            )
+        return cur.rowcount == 1

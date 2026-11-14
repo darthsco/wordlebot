@@ -6,14 +6,23 @@ import asyncio
 import logging
 import random
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import date, datetime, timedelta
 
 from . import leaderboard
-from .config import Config
-from .db import Database, Score, Starter
+from .config import Config, Overrides, is_editable, parse_value, with_overrides
+from .db import Database, DeletedScore, Score, Starter
 from .game import Mark, puzzle_date, puzzle_number
-from .scores import MISMATCH, PENDING, ParsedShare, grid_rows, parse_share, verify
+from .scores import (
+    MISMATCH,
+    NO_STARTER,
+    PENDING,
+    VERIFIED,
+    ParsedShare,
+    grid_rows,
+    parse_share,
+    verify,
+)
 from .selection import excluded_words, pick_starter
 from .solutions import SolutionSource, peek_solution, sync_solutions
 from .words import WordLists
@@ -77,6 +86,96 @@ class DuePost:
 
 
 @dataclass(frozen=True)
+class ReactionUpdate:
+    """A share whose status reaction should change: `previous` comes off, `current`
+    goes on (None for either means nothing to remove or add)."""
+
+    score: Score
+    previous: str | None
+    current: str | None
+
+
+@dataclass(frozen=True)
+class Actor:
+    """Who did an admin action, for the audit log."""
+
+    name: str
+    address: str = ""
+
+
+class AdminError(Exception):
+    """An admin action that can't be done; the message is shown to the admin."""
+
+
+STATUSES = (PENDING, VERIFIED, MISMATCH, NO_STARTER)
+
+# Score edits, see `WordleService.plan_*`.
+DELETE = "delete"
+RESTORE = "restore"
+OVERRIDE = "override"
+ADD = "add"
+
+
+@dataclass(frozen=True)
+class ScoreEdit:
+    """A planned change to one score, to preview and then apply."""
+
+    action: str  # DELETE | RESTORE | OVERRIDE | ADD
+    before: Score | None  # the stored row now (None for ADD and RESTORE)
+    after: Score | None  # the row afterwards (None for DELETE)
+    deleted_id: int | None = None  # RESTORE: the deleted_scores row
+
+    @property
+    def score(self) -> Score:
+        result = self.after or self.before
+        assert result is not None
+        return result
+
+
+@dataclass(frozen=True)
+class PlayerStanding:
+    rank: int | None  # None: below the all-time minimum, unranked
+    average: float
+    games: int
+
+
+@dataclass(frozen=True)
+class EditPreview:
+    edit: ScoreEdit
+    before: PlayerStanding | None  # the player's all-time standing now
+    after: PlayerStanding | None  # ...and after the edit
+
+
+@dataclass(frozen=True)
+class ConfigRow:
+    section: str
+    key: str
+    value: object  # effective value
+    file_value: object  # value from config.toml (or the default)
+    editable: bool
+    overridden: bool
+    updated: tuple[str, str] | None  # (when, by) for an override
+
+
+@dataclass(frozen=True)
+class Overview:
+    """What the panel's dashboard shows; see `WordleService.overview`."""
+
+    now: datetime
+    current: Starter | None
+    upcoming: Starter | None
+    next_post_at: datetime
+    due: list[DuePost]
+    solutions_cached: int
+    latest_solution: date | None
+    today_solution_cached: bool
+    pending_scores: int
+    submissions_current: int
+    submissions_upcoming: int
+    visible_answers: list[tuple[Starter, str]]  # recent puzzles whose answer may be shown
+
+
+@dataclass(frozen=True)
 class Submission:
     share: ParsedShare
     status: str
@@ -102,7 +201,10 @@ class WordleService:
         self._refresh_lock: asyncio.Lock | None = None
         self._refresh_loop: asyncio.AbstractEventLoop | None = None
         self._refresh_retry_at: datetime | None = None
-        self._resolved: list[Score] = []
+        self._reactions: list[ReactionUpdate] = []
+        # The config as loaded from the file, before panel overrides.
+        self.file_config = config
+        self.overrides_error: str | None = None
 
     # --- time ------------------------------------------------------------
 
@@ -227,14 +329,18 @@ class WordleService:
             if status != PENDING:
                 self.db.set_score_status(score.puzzle_number, score.user_id, status)
                 resolved.append(replace(score, status=status))
-        self._resolved += resolved
+        self._reactions += [ReactionUpdate(s, PENDING, s.status) for s in resolved]
         return resolved
 
+    def take_reaction_updates(self) -> list[ReactionUpdate]:
+        """Shares whose status changed since the last call (settled, or edited in the
+        panel), for the bot to update the reaction on each one's message."""
+        updates, self._reactions = self._reactions, []
+        return updates
+
     def take_resolved(self) -> list[Score]:
-        """Scores that left `pending` since the last call, for the caller to act on
-        (the bot updates the reaction on each one's message)."""
-        resolved, self._resolved = self._resolved, []
-        return resolved
+        """The scores of `take_reaction_updates`, as they are now."""
+        return [u.score for u in self.take_reaction_updates()]
 
     # --- starters --------------------------------------------------------
 
@@ -349,7 +455,7 @@ class WordleService:
         self.db.mark_announced(target, message_id, daily_post=scheduled)
         log.info("Posted starter %s for %s (%s)", starter.word, target, post.kind)
 
-    async def reroll(self, send: Send) -> Starter:
+    async def reroll(self, send: Send, actor: Actor | None = None) -> Starter:
         """Replace the upcoming starter and announce it.
 
         Raises `PuzzleInPlay` if that puzzle has started, which with
@@ -372,7 +478,18 @@ class WordleService:
             exclude.add(previous.word)
         starter = await self.choose_starter(target, exclude, today)
         self.db.save_starter(starter)
-        message_id = await send(REROLL_PREFIX + starter_announcement(starter))
+        if actor is not None:
+            self.db.audit(
+                actor.name,
+                "reroll",
+                f"Wordle {number:,}: {previous.word.upper() if previous else '(none)'}"
+                f" -> {starter.word.upper()}",
+                address=actor.address,
+            )
+        text = REROLL_PREFIX + starter_announcement(starter)
+        if actor is not None and self.config.announce.reroll:
+            text += f"\n-# Rerolled from the admin panel by {leaderboard.escape_name(actor.name)}."
+        message_id = await send(text)
         self.db.mark_announced(target, message_id)
         return starter
 
@@ -504,3 +621,295 @@ class WordleService:
             lines.append(line)
         lines.append(f"-# Answers appear {ANSWER_REVEAL_DAYS} days after their puzzle.")
         return "\n".join(lines)
+
+    # --- admin panel -------------------------------------------------------
+    #
+    # Everything the panel changes is audited. Score edits are planned first, so the
+    # panel can show their effect before the admin confirms, and re-planned from the
+    # same input on confirm: `apply_edit` refuses one whose row changed in between.
+
+    def overview(self) -> Overview:
+        now = self.now()
+        today = now.date()
+        schedule = self.config.schedule
+        post_at = datetime.combine(today, schedule.post_time_local)
+        if self.db.daily_post_completed(self.target_date(today)):
+            post_at = datetime.combine(today + timedelta(days=1), schedule.post_time_local)
+        dates = self.db.solution_dates()
+        current = self.current_starter(today)
+        upcoming = self.upcoming_starter(today)
+        visible = []
+        for starter in reversed(self.db.starters_between(None, today)[-7:]):
+            if self.answer_visible(starter.target_date, today) and (
+                answer := self.db.solution_for(starter.puzzle_number)
+            ):
+                visible.append((starter, answer))
+        return Overview(
+            now=now,
+            current=current,
+            upcoming=upcoming,
+            next_post_at=post_at,
+            due=self.due_posts(now),
+            solutions_cached=len(dates),
+            latest_solution=max(dates, default=None),
+            today_solution_cached=today in dates,
+            pending_scores=len(self.db.scores_with_status(PENDING)),
+            submissions_current=self.db.score_count(puzzle_number(today, self.launch)),
+            submissions_upcoming=self.db.score_count(puzzle_number(self.target_date(today), self.launch)),
+            visible_answers=visible,
+        )
+
+    def answer_for_panel(self, number: int, today: date | None = None) -> str | None:
+        """A puzzle's answer if `answer_visible` allows showing it, else None."""
+        if number < 0 or not self.answer_visible(puzzle_date(number, self.launch), today):
+            return None
+        return self.db.solution_for(number)
+
+    # Score edits.
+
+    def _stored(self, number: int, user_id: int) -> Score:
+        score = self.db.score_for(number, user_id)
+        if score is None:
+            raise AdminError(f"No score from user {user_id} for Wordle {number:,}.")
+        return score
+
+    def plan_delete(self, number: int, user_id: int) -> ScoreEdit:
+        return ScoreEdit(DELETE, self._stored(number, user_id), None)
+
+    def plan_override(self, number: int, user_id: int, status: str) -> ScoreEdit:
+        if status not in STATUSES:
+            raise AdminError(f"Unknown status {status!r}.")
+        score = self._stored(number, user_id)
+        if score.status == status:
+            raise AdminError(f"That score is already {status}.")
+        return ScoreEdit(OVERRIDE, score, replace(score, status=status))
+
+    def plan_reverify(self, number: int, user_id: int) -> ScoreEdit:
+        """Put a score back to the status the rules give it (undoes an override)."""
+        score = self._stored(number, user_id)
+        status = self._status(number, grid_rows(score.grid)[0], self.today())
+        if score.status == status:
+            raise AdminError(f"That score is already {status}, as the rules have it.")
+        return ScoreEdit(OVERRIDE, score, replace(score, status=status))
+
+    def plan_restore(self, deleted_id: int) -> ScoreEdit:
+        deleted = self.db.deleted_score(deleted_id)
+        if deleted is None:
+            raise AdminError("That deleted score no longer exists.")
+        score = deleted.score
+        if self.db.score_for(score.puzzle_number, score.user_id) is not None:
+            raise AdminError(
+                f"{score.user_name} has a score for Wordle {score.puzzle_number:,} again; "
+                "delete that one first."
+            )
+        # Its status is decided afresh: the starter or solution may be known by now.
+        status = self._status(score.puzzle_number, grid_rows(score.grid)[0], self.today())
+        return ScoreEdit(RESTORE, None, replace(score, status=status), deleted_id)
+
+    async def plan_add(self, user_id: int, user_name: str, text: str) -> ScoreEdit:
+        """A score entered by an admin from a member's share text, verified as usual."""
+        game = self.config.game
+        if user_id <= 0:
+            raise AdminError("Enter the member's Discord user ID (a positive number).")
+        user_name = " ".join(user_name.split())
+        if not user_name:
+            raise AdminError("Enter the member's display name.")
+        share = parse_share(text, game.word_length, game.max_guesses)
+        if share is None:
+            raise AdminError("That isn't a Wordle share (paste the whole thing, header and grid).")
+        today = self.today()
+        if not self._playable(share.puzzle_number, today):
+            raise AdminError(f"Wordle {share.puzzle_number:,} can't have been played yet.")
+        if self.db.score_for(share.puzzle_number, user_id) is not None:
+            raise AdminError(f"That member already has a score for Wordle {share.puzzle_number:,}.")
+        await self.refresh_if_missing(puzzle_date(share.puzzle_number, self.launch))
+        status = self._status(share.puzzle_number, share.rows[0], today)
+        score = Score(
+            share.puzzle_number, user_id, user_name, share.guesses, share.hard_mode,
+            share.grid_text, status,
+        )
+        return ScoreEdit(ADD, None, score)
+
+    def _all_time_standing(self, scores: list[Score], user_id: int) -> PlayerStanding | None:
+        rows = leaderboard.standings(
+            leaderboard.counted(scores, self.config.scores.count_unverified), self.config.game.fail_score
+        )
+        minimum = self.config.scores.min_games_all_time
+        qualifying = [r for r in rows if r.games >= minimum]
+        for rank, row in leaderboard.ranked(qualifying):
+            if row.user_id == user_id:
+                return PlayerStanding(rank, row.average, row.games)
+        for row in rows:
+            if row.user_id == user_id:
+                return PlayerStanding(None, row.average, row.games)
+        return None
+
+    def preview(self, edit: ScoreEdit) -> EditPreview:
+        """The player's all-time standing before and after `edit`."""
+        target = edit.score
+        last = max(puzzle_number(self.today(), self.launch), target.puzzle_number)
+        scores = self.db.scores_between(None, last)
+        key = (target.puzzle_number, target.user_id)
+        after = [s for s in scores if (s.puzzle_number, s.user_id) != key]
+        if edit.after is not None:
+            after.append(replace(edit.after, submitted_at=edit.after.submitted_at or "9999"))
+        return EditPreview(
+            edit,
+            self._all_time_standing(scores, target.user_id),
+            self._all_time_standing(after, target.user_id),
+        )
+
+    async def apply_edit(self, edit: ScoreEdit, actor: Actor, reason: str, send: Send | None = None) -> None:
+        """Make a planned edit, audit it, queue its reaction change, and announce it if
+        configured. Raises AdminError if the score changed since it was planned."""
+        reason = " ".join(reason.split())
+        if not reason:
+            raise AdminError("A reason is required.")
+        score = edit.score
+        current = self.db.score_for(score.puzzle_number, score.user_id)
+        if current != edit.before:
+            raise AdminError("That score changed since you looked at it; start again.")
+        where = f"Wordle {score.puzzle_number:,}, {score.user_name} ({score.user_id})"
+        if edit.action == DELETE:
+            self.db.delete_score(score.puzzle_number, score.user_id, actor.name, reason)
+            detail = f"{where}: deleted {describe_score(score, self.config.game.max_guesses)}"
+            self._reactions.append(ReactionUpdate(score, score.status, None))
+        elif edit.action == RESTORE:
+            assert edit.deleted_id is not None and edit.after is not None
+            if not self.db.restore_score(edit.deleted_id, edit.after.status):
+                raise AdminError("That score could not be restored; start again.")
+            detail = f"{where}: restored {describe_score(edit.after, self.config.game.max_guesses)}"
+            self._reactions.append(ReactionUpdate(edit.after, None, edit.after.status))
+        elif edit.action == OVERRIDE:
+            assert edit.before is not None and edit.after is not None
+            self.db.set_score_status(score.puzzle_number, score.user_id, edit.after.status)
+            detail = f"{where}: status {edit.before.status} -> {edit.after.status}"
+            self._reactions.append(ReactionUpdate(edit.after, edit.before.status, edit.after.status))
+        elif edit.action == ADD:
+            assert edit.after is not None
+            if not self.db.add_score(edit.after):
+                raise AdminError("That member has a score for this puzzle now; start again.")
+            detail = f"{where}: added {describe_score(edit.after, self.config.game.max_guesses)}"
+        else:
+            raise AdminError(f"Unknown edit {edit.action!r}.")
+        self.db.audit(actor.name, f"score_{edit.action}", detail, reason, actor.address)
+        log.info("Admin %s: %s (%s)", actor.name, detail, reason)
+        if send is not None and getattr(self.config.announce, f"score_{edit.action}"):
+            await self._announce(send, actor, _announcement(edit))
+
+    async def _announce(self, send: Send, actor: Actor, text: str) -> None:
+        """Post an admin-action note; a failure is logged, as the action itself is done."""
+        try:
+            await send(f"🛠️ {text} (by {leaderboard.escape_name(actor.name)}, via the admin panel)")
+        except Exception:
+            log.exception("Could not announce an admin action")
+
+    async def settle_pending(self, actor: Actor) -> int:
+        """Fetch any missing solution and settle the pending scores that can be."""
+        before = len(self.db.scores_with_status(PENDING))
+        await self.refresh(self.today())
+        settled = before - len(self.db.scores_with_status(PENDING))
+        self.db.audit(actor.name, "settle_pending", f"{settled} score(s) settled", address=actor.address)
+        return settled
+
+    # Config overrides.
+
+    def load_overrides(self) -> None:
+        """Apply the overrides stored in the database (at startup).
+
+        If they no longer validate against the file (it was edited since), the bot
+        runs on the file alone and the panel shows why.
+        """
+        try:
+            self.config = with_overrides(self.file_config, self.db.config_overrides())
+            self.overrides_error = None
+        except ValueError as exc:
+            self.config = self.file_config
+            self.overrides_error = str(exc)
+            log.error("Ignoring the panel's config overrides: %s", exc)
+
+    def config_rows(self) -> list[ConfigRow]:
+        overrides = self.db.config_overrides()
+        meta = self.db.config_override_meta()
+        rows = []
+        for section_field in fields(Config):
+            section = section_field.name
+            if section == "token":
+                continue
+            for key_field in fields(getattr(self.config, section)):
+                key = key_field.name
+                rows.append(
+                    ConfigRow(
+                        section,
+                        key,
+                        getattr(getattr(self.config, section), key),
+                        getattr(getattr(self.file_config, section), key),
+                        is_editable(section, key),
+                        (section, key) in overrides,
+                        meta.get((section, key)),
+                    )
+                )
+        return rows
+
+    def _apply_overrides(self, overrides: Overrides) -> Config:
+        try:
+            return with_overrides(self.file_config, overrides)
+        except ValueError as exc:
+            raise AdminError(str(exc).removeprefix("Invalid config: ")) from None
+
+    async def set_config(
+        self, section: str, key: str, text: str, actor: Actor, send: Send | None = None
+    ) -> None:
+        try:
+            value = parse_value(section, key, text)
+        except ValueError as exc:
+            raise AdminError(str(exc)) from None
+        old = getattr(getattr(self.config, section), key)
+        overrides = self.db.config_overrides()
+        overrides[(section, key)] = value
+        self.config = self._apply_overrides(overrides)
+        self.overrides_error = None
+        self.db.set_config_override(section, key, value, actor.name)
+        await self._config_changed(section, key, old, value, actor, send)
+
+    async def reset_config(self, section: str, key: str, actor: Actor, send: Send | None = None) -> None:
+        overrides = self.db.config_overrides()
+        if overrides.pop((section, key), None) is None:
+            raise AdminError(f"[{section}] {key} isn't overridden.")
+        old = getattr(getattr(self.config, section), key)
+        self.config = self._apply_overrides(overrides)
+        self.db.delete_config_override(section, key)
+        new = getattr(getattr(self.config, section), key)
+        await self._config_changed(section, key, old, new, actor, send, reset=True)
+
+    async def _config_changed(
+        self, section: str, key: str, old: object, new: object, actor: Actor,
+        send: Send | None, reset: bool = False,
+    ) -> None:
+        detail = f"[{section}] {key}: {old!r} -> {new!r}" + (" (reset to file)" if reset else "")
+        self.db.audit(actor.name, "config_reset" if reset else "config_set", detail, address=actor.address)
+        log.info("Admin %s: %s", actor.name, detail)
+        # Settings that decide a status (a starter's availability, what counts) may
+        # settle pending scores.
+        self.reverify_pending()
+        if send is not None and self.config.announce.config_change and section != "announce":
+            await self._announce(send, actor, f"Setting `{section}.{key}` changed to `{new!r}`")
+
+
+def describe_score(score: Score, max_guesses: int) -> str:
+    """A score as its share header shows it, plus its status: "4/6* (verified)"."""
+    result = "X" if score.guesses is None else str(score.guesses)
+    return f"{result}/{max_guesses}{'*' if score.hard_mode else ''} ({score.status})"
+
+
+def _announcement(edit: ScoreEdit) -> str:
+    score = edit.score
+    who = leaderboard.escape_name(score.user_name)
+    where = f"Wordle {score.puzzle_number:,}"
+    if edit.action == DELETE:
+        return f"Removed {who}'s score for {where}"
+    if edit.action == RESTORE:
+        return f"Restored {who}'s score for {where}"
+    if edit.action == OVERRIDE:
+        return f"Changed {who}'s score for {where} to {score.status}"
+    return f"Added {who}'s score for {where}"
