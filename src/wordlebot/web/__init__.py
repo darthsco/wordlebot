@@ -69,7 +69,10 @@ SECURITY_HEADERS = {
     "Strict-Transport-Security": "max-age=31536000",
     "Content-Security-Policy": CSP,
     "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
+    # Not "no-referrer": under it browsers send `Origin: null` on plain form posts,
+    # which the same-origin check below would refuse. "same-origin" still sends
+    # nothing to other sites.
+    "Referrer-Policy": "same-origin",
     "X-Frame-Options": "DENY",
     "Cross-Origin-Opener-Policy": "same-origin",
     "Cache-Control": "no-store",
@@ -156,8 +159,7 @@ class Panel:
         if request.method == "POST":
             # Same-origin POSTs only. SameSite=Strict cookies and CSRF tokens cover
             # signed-in forms; this also covers the login form itself.
-            origin = request.headers.get("Origin")
-            if origin != f"https://{request.host}":
+            if not self._same_origin(request):
                 return web.Response(status=403, text="Cross-origin request refused.")
         try:
             response = await handler(request)
@@ -168,6 +170,21 @@ class Panel:
         if isinstance(response, web.HTTPException):
             raise response
         return response
+
+    @staticmethod
+    def _same_origin(request: web.Request) -> bool:
+        """Whether a POST came from one of the panel's own pages.
+
+        Browsers send `Origin` on every POST, but as "null" in some cases (a strict
+        referrer policy, privacy settings); then `Sec-Fetch-Site`, which pages can't
+        set, says whether the request is same-origin.
+        """
+        origin = request.headers.get("Origin")
+        if origin == f"https://{request.host}":
+            return True
+        if origin in (None, "null"):
+            return request.headers.get("Sec-Fetch-Site") == "same-origin"
+        return False
 
     @web.middleware
     async def _authenticate(self, request: web.Request, handler: Handler) -> web.StreamResponse:

@@ -124,8 +124,23 @@ def test_plain_http_and_cross_origin_posts_are_refused(tmp_path):
             "/login", {"username": "ada", "password": PASSWORD}, csrf=False, Origin="https://evil.test"
         )
         assert response.status == 403 and "Cross-origin" in text
+        # A browser that withholds the origin is believed only on Sec-Fetch-Site.
+        login = {"username": "ada", "password": PASSWORD}
+        for origin, fetch_site, allowed in [
+            ("null", "same-origin", True),
+            (None, "same-origin", True),
+            ("null", "cross-site", False),
+            ("null", None, False),
+            (None, None, False),
+        ]:
+            response, _ = await browser.post(
+                "/login", login, csrf=False, Origin=origin, **{"Sec-Fetch-Site": fetch_site}
+            )
+            assert (response.status != 403) is allowed, (origin, fetch_site)
         response, _ = await browser.get("/login")
         assert response.status == 200
+        # "no-referrer" would make browsers send `Origin: null` on the login form.
+        assert response.headers["Referrer-Policy"] == "same-origin"
         assert "max-age" in response.headers["Strict-Transport-Security"]
         assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
 
