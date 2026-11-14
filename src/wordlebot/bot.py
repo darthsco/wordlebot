@@ -18,6 +18,7 @@ import functools
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
+from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
@@ -25,7 +26,8 @@ from discord.ext import tasks
 
 from .config import Config
 from .scores import MISMATCH, NO_STARTER, PENDING, VERIFIED
-from .service import PuzzleInPlay, SubmissionsExist, WordleService
+from .db import Starter
+from .service import Actor, PuzzleInPlay, SubmissionsExist, WordleService
 from .version import version_info
 
 log = logging.getLogger(__name__)
@@ -71,8 +73,9 @@ class WordleBot(discord.Client):
         # member-chosen display names. A message that should ping must pass its
         # own allowed_mentions at the call site.
         super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
-        self.config = config
+        assert config is service.config
         self.service = service
+        self.started_at = datetime.now(timezone.utc)
         self.tree = app_commands.CommandTree(self)
         # Serializes everything that picks or announces a starter (the loop, /reroll).
         self._post_lock = asyncio.Lock()
@@ -80,6 +83,11 @@ class WordleBot(discord.Client):
         self.reconcile = tasks.loop(seconds=RECONCILE_SECONDS)(self._reconcile)
         self.reconcile.before_loop(self.wait_until_ready)
         self._register_commands()
+
+    @property
+    def config(self) -> Config:
+        """The service's config, which the admin panel can replace while running."""
+        return self.service.config
 
     # --- lifecycle -------------------------------------------------------
 
@@ -136,10 +144,12 @@ class WordleBot(discord.Client):
     # --- reactions -------------------------------------------------------
 
     async def _update_reactions(self) -> None:
-        """Swap ⏳ for the outcome on every share that was verified since last time."""
-        for score in self.service.take_resolved():
+        """Swap the status reaction on every share whose status changed since last
+        time: ⏳ for the outcome once settled, or whatever an admin changed."""
+        for update in self.service.take_reaction_updates():
+            score = update.score
             if score.channel_id is None or score.message_id is None:
-                continue  # stored before submissions recorded their message
+                continue  # stored before submissions recorded their message, or by an admin
             try:
                 channel = await self.channel(score.channel_id)
                 message = channel.get_partial_message(score.message_id)  # type: ignore[attr-defined]
@@ -148,14 +158,47 @@ class WordleBot(discord.Client):
                 continue
             # Separate attempts: the new reaction is worth adding even if the old
             # one can't be removed. A deleted message or missing permission fails both.
-            try:
-                await message.remove_reaction(STATUS_REACTIONS[PENDING], self.user)
-            except discord.HTTPException:
-                log.warning("Could not remove the pending reaction on %s", score.message_id)
-            try:
-                await message.add_reaction(STATUS_REACTIONS[score.status])
-            except discord.HTTPException:
-                log.warning("Could not react to message %s", score.message_id)
+            if update.previous is not None:
+                try:
+                    await message.remove_reaction(STATUS_REACTIONS[update.previous], self.user)
+                except discord.HTTPException:
+                    log.warning("Could not remove the %s reaction on %s", update.previous, score.message_id)
+            if update.current is not None:
+                try:
+                    await message.add_reaction(STATUS_REACTIONS[update.current])
+                except discord.HTTPException:
+                    log.warning("Could not react to message %s", score.message_id)
+
+    # --- admin panel hooks -----------------------------------------------
+    #
+    # The panel (web.py) calls these, so it takes the same lock and updates the
+    # same reactions as the loop and the slash commands.
+
+    async def panel_send(self, text: str) -> int:
+        return await self._send(text)
+
+    async def panel_reroll(self, actor: Actor) -> Starter:
+        async with self._post_lock:
+            return await self.service.reroll(self._send, actor)
+
+    async def panel_tick(self) -> None:
+        await self._tick()
+
+    async def panel_settle(self, actor: Actor) -> int:
+        try:
+            async with self._post_lock:
+                return await self.service.settle_pending(actor)
+        finally:
+            await self._update_reactions()
+
+    async def panel_update_reactions(self) -> None:
+        await self._update_reactions()
+
+    def panel_gateway(self) -> tuple[bool, str | None, float | None]:
+        """(connected, bot user, heartbeat latency in ms)."""
+        ready = self.is_ready() and not self.is_closed()
+        latency = self.latency * 1000 if ready and self.latency == self.latency else None  # NaN check
+        return ready, str(self.user) if self.user else None, latency
 
     async def _refresh_for_report(self) -> None:
         """Give a missing solution a moment to arrive before a report is built.
