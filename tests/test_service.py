@@ -367,20 +367,27 @@ def test_add_starter_keeps_the_first_pick(tmp_path):
     assert first.word == second.word == "slate" and not second.announced
 
 
-def test_existing_database_is_migrated_in_place(tmp_path):
-    path = tmp_path / "old.sqlite3"
+def old_database(path, *starters):
+    """A database from before `daily_posts`, holding (target, word, posted_at) starters."""
     old = sqlite3.connect(path)
     old.execute(
         "CREATE TABLE starters (target_date TEXT PRIMARY KEY, puzzle_number INTEGER NOT NULL"
         " UNIQUE, word TEXT NOT NULL, strategy TEXT NOT NULL, posted_at TEXT NOT NULL,"
         " message_id INTEGER)"
     )
-    old.execute(
-        "INSERT INTO starters VALUES (?, 13, 'slate', 'x', '2026-11-14T01:00:00+00:00', 555)",
-        (TOMORROW.isoformat(),),
-    )
+    for n, (target, word, posted_at) in enumerate(starters):
+        old.execute(
+            "INSERT INTO starters VALUES (?, ?, ?, 'x', ?, ?)",
+            (target.isoformat(), (target - LAUNCH).days, word, posted_at, 555 + n),
+        )
     old.commit()
     old.close()
+
+
+def test_existing_database_is_migrated_in_place(tmp_path):
+    path = tmp_path / "old.sqlite3"
+    # Announced by the 20:00 New York post (01:00 UTC).
+    old_database(path, (TOMORROW, "slate", "2026-11-14T01:00:00+00:00"))
 
     db = Database(path)
     assert db.starter_for_date(TOMORROW).announced
@@ -392,6 +399,33 @@ def test_existing_database_is_migrated_in_place(tmp_path):
     assert db.retired_words(TOMORROW) == {"slate"}
     db.close()
     assert Database(path).daily_post_completed(TOMORROW)  # reopening is a no-op
+
+
+def test_migration_still_owes_the_post_for_a_starter_rerolled_before_it(tmp_path):
+    # Upgrading after a /reroll announced tomorrow's starter at 13:00 New York
+    # (18:00 UTC), before its 20:00 daily post. The post must remind, not be skipped.
+    path = tmp_path / "old.sqlite3"
+    old_database(
+        path,
+        (TODAY, "crane", "2026-11-13T01:00:00+00:00"),  # yesterday's daily post
+        (TOMORROW, "slate", "2026-11-13T18:00:00+00:00"),  # rerolled early
+    )
+    config = Config(solutions=SolutionsConfig(launch_date=LAUNCH.isoformat()))
+    db = Database(path, config.schedule)
+    assert db.daily_post_completed(TODAY)
+    assert not db.daily_post_completed(TOMORROW)
+
+    clock = Clock(config, hour=19)
+    service = WordleService(config, db, FakeSource({}), LISTS, random.Random(0), clock)
+    assert service.due_posts() == []
+    clock.set(TODAY, 20)
+    assert service.due_posts() == [DuePost(TOMORROW, SCHEDULED)]
+
+    channel = Channel()
+    asyncio.run(service.post_due(channel.send))
+    assert RESULTS in channel.sent[0]
+    assert channel.sent[1].startswith(REMINDER_PREFIX) and word_in(channel.sent[1]) == "slate"
+    assert service.due_posts() == []
 
 
 # --- scores: verifying against a solution that isn't cached yet ---------------

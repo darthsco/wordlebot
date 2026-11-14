@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+from .config import ScheduleConfig
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS solutions (
@@ -94,14 +96,14 @@ def _now() -> str:
 
 
 class Database:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, schedule: ScheduleConfig | None = None) -> None:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         upgrading = self._has_table("starters") and not self._has_table("daily_posts")
         self.conn.executescript(SCHEMA)
         if upgrading:
-            self._backfill_daily_posts()
+            self._backfill_daily_posts(schedule or ScheduleConfig())
         self._add_score_message_columns()
 
     def _has_table(self, name: str) -> bool:
@@ -110,18 +112,26 @@ class Database:
         ).fetchone()
         return row is not None
 
-    def _backfill_daily_posts(self) -> None:
+    def _backfill_daily_posts(self, schedule: ScheduleConfig) -> None:
         """Migrate a database from before `daily_posts` existed.
 
-        Every starter that reached the channel is taken to have had its daily post,
-        so upgrading after post time doesn't repeat today's results and starter.
+        A starter announced at or after its daily post's scheduled time is taken to
+        have had that post, so upgrading after post time doesn't repeat today's
+        results and starter. One announced earlier (by `/reroll`) has not: its
+        daily post is still owed, as a reminder.
         """
+        rows = self.conn.execute(
+            "SELECT target_date, posted_at FROM starters WHERE message_id IS NOT NULL"
+        ).fetchall()
+        done = []
+        for target_iso, posted_at in rows:
+            target = date.fromisoformat(target_iso)
+            post_day = target - timedelta(days=schedule.target_offset_days)
+            due = datetime.combine(post_day, schedule.post_time_local)
+            if datetime.fromisoformat(posted_at) >= due:
+                done.append((target_iso, posted_at, posted_at))
         with self.conn:
-            self.conn.execute(
-                "INSERT OR IGNORE INTO daily_posts "
-                "SELECT target_date, posted_at, posted_at FROM starters "
-                "WHERE message_id IS NOT NULL"
-            )
+            self.conn.executemany("INSERT OR IGNORE INTO daily_posts VALUES (?, ?, ?)", done)
 
     def _add_score_message_columns(self) -> None:
         """Migrate a `scores` table from before submissions recorded their message.

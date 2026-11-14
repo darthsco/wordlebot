@@ -24,7 +24,7 @@ from .words import WordLists
 
 
 async def _offline(command: str, config: Config) -> None:
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, config.schedule)
     lists = WordLists.load(config.storage.words_dir, config.game.word_length)
     async with aiohttp.ClientSession() as session:
         service = WordleService(config, db, NytSolutionSource(session, config.solutions.base_url), lists)
@@ -42,7 +42,7 @@ async def _run(config: Config) -> None:
 
     if not config.token:
         raise SystemExit("DISCORD_TOKEN is not set (see .env.example)")
-    db = Database(config.storage.database_path)
+    db = Database(config.storage.database_path, config.schedule)
     lists = WordLists.load(config.storage.words_dir, config.game.word_length)
     async with aiohttp.ClientSession() as session:
         service = WordleService(config, db, NytSolutionSource(session, config.solutions.base_url), lists)
