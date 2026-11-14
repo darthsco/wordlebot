@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Dashboard</h1>
+<div hx-get="/status" hx-trigger="every 30s" hx-swap="innerHTML">
+{% include "_status.html" %}
+</div>
+
+<section class="card">
+  <h2>Actions</h2>
+  <div class="actions">
+    <form method="post" action="/actions/reroll" hx-confirm="Pick and post a new upcoming starter to the channel?">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button>Reroll upcoming starter</button>
+    </form>
+    <form method="post" action="/actions/tick">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="secondary">Run posting tick now</button>
+    </form>
+    <form method="post" action="/actions/settle">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="secondary">Sync solutions &amp; settle pending</button>
+    </form>
+  </div>
+  <p class="muted">A reroll is refused once the puzzle has started or anyone has submitted for it, as with <code>/reroll</code>. The posting tick sends anything owed, the same as the minute loop.</p>
+</section>
+{% endblock %}

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Audit log</h1>
+{% if entries %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Detail</th><th>Reason</th><th>Address</th></tr></thead>
+  <tbody>
+  {% for e in entries %}
+  <tr class="{{ 'bad-row' if e.action.endswith('failed') or e.action.startswith('login_locked') or e.action == 'login_refused' else '' }}">
+    <td>{{ e.at | local }}</td><td>{{ e.actor }}</td><td>{{ e.action }}</td><td>{{ e.detail }}</td><td>{{ e.reason }}</td><td>{{ e.address }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% if entries | length == 100 %}<p><a href="/audit?before={{ entries[-1].id }}">Older →</a></p>{% endif %}
+{% else %}<p class="muted">No entries.</p>{% endif %}
+{% endblock %}

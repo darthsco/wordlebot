@@ -5,9 +5,12 @@ description = "Discord bot that posts a shared daily Wordle starting word and tr
 requires-python = ">=3.12"
 dependencies = [
     "discord.py>=2.6",
-    "aiohttp>=3.9",
+    "aiohttp>=3.12",
     "python-dotenv>=1.0",
     "tzdata",  # zoneinfo database for slim container images
+    "jinja2>=3.1",  # admin panel templates
+    "pyotp>=2.9",  # admin panel two-factor codes
+    "segno>=1.6",  # admin panel authenticator QR code
 ]
 
 [project.optional-dependencies]
@@ -22,6 +25,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"wordlebot.web" = ["templates/*.html", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
