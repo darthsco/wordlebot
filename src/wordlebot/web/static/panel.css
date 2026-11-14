@@ -12,6 +12,7 @@
   }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }  /* the display rules below would otherwise show hidden fields */
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); }
 header nav { display: flex; flex-wrap: wrap; gap: 4px 14px; flex: 1; }
@@ -21,6 +22,9 @@ header nav a[aria-current="page"] { color: var(--text); font-weight: 600; }
 main { max-width: 1100px; margin: 0 auto; padding: 16px; }
 h1 { font-size: 1.5rem; margin: 8px 0 16px; }
 h2 { font-size: 1.1rem; margin: 0 0 10px; }
+dl + h2, dl + table, details { margin-top: 16px; }
+details { margin-bottom: 12px; }
+form button + a { margin-left: 12px; }
 a { color: var(--accent); }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
 .narrow { max-width: 420px; margin-left: auto; margin-right: auto; }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import platform
 import subprocess
@@ -18,8 +19,13 @@ def _package(name: str) -> str:
 
 def commit() -> str:
     """The deployed commit: baked into the image by update.sh, else read from git."""
-    if sha := os.environ.get("WORDLEBOT_COMMIT", "").strip():
-        return sha
+    return os.environ.get("WORDLEBOT_COMMIT", "").strip() or _git_commit()
+
+
+@functools.cache
+def _git_commit() -> str:
+    """Read once: it describes the code this process loaded, even if the checkout
+    moves on, and the panel's dashboard asks every 30 seconds."""
     try:
         return subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -33,10 +39,12 @@ def commit() -> str:
         return "unknown"
 
 
-def version_info() -> str:
+def version_info(markdown: bool = True) -> str:
+    """For `/version` (Discord markdown), or as plain text for the admin panel."""
+    name, sha = ("**wordlebot**", f"`{commit()}`") if markdown else ("wordlebot", commit())
     return "\n".join(
         [
-            f"**wordlebot** {_package('wordlebot')} (commit `{commit()}`)",
+            f"{name} {_package('wordlebot')} (commit {sha})",
             f"discord.py {_package('discord.py')} · Python {platform.python_version()}",
         ]
     )

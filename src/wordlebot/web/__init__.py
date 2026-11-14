@@ -311,7 +311,7 @@ class Panel:
             "bot_user": bot_user,
             "latency": latency,
             "uptime": str(uptime).split(".")[0],
-            "version": version_info(),
+            "version": version_info(markdown=False),
             "overrides_error": self.service.overrides_error,
         }
 
@@ -453,7 +453,11 @@ class Panel:
             self._flash_next(request, str(exc))
         else:
             await self.host.panel_update_reactions()
-            self._flash_next(request, f"Done: {edit.action} for {edit.score.user_name}, Wordle {edit.score.puzzle_number:,}.")
+            done = {DELETE: "Deleted", RESTORE: "Restored", OVERRIDE: "Changed the status of", ADD: "Added"}
+            self._flash_next(
+                request,
+                f"{done[edit.action]} {edit.score.user_name}'s score for Wordle {edit.score.puzzle_number:,}.",
+            )
         raise web.HTTPSeeOther(
             f"/scores?{urlencode({'puzzle': edit.score.puzzle_number})}"
         )
