@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Deleted scores</h1>
+{% if rows %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Puzzle</th><th>Player</th><th>Score</th><th>Deleted</th><th>Reason</th><th></th></tr></thead>
+  <tbody>
+  {% for d in rows %}
+  <tr>
+    <td>{{ "{:,}".format(d.score.puzzle_number) }}</td>
+    <td>{{ d.score.user_name }}<br><small class="muted">{{ d.score.user_id }}</small></td>
+    <td>{{ d.score | score }}</td>
+    <td>{{ d.deleted_at | local }} by {{ d.deleted_by }}</td>
+    <td>{{ d.reason }}</td>
+    <td>
+      <form method="post" action="/scores/edit">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="deleted_id" value="{{ d.id }}">
+        <input type="hidden" name="puzzle" value="{{ d.score.puzzle_number }}">
+        <button name="action" value="restore" class="secondary">Restore</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}<p class="muted">Nothing deleted.</p>{% endif %}
+{% endblock %}

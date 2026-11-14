@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false}'>
+<title>{% block title %}wordlebot admin{% endblock %}</title>
+<link rel="stylesheet" href="{{ static('panel.css') }}">
+<script src="{{ static('htmx.min.js') }}" defer></script>
+</head>
+<body hx-boost="true">
+<header>
+  <strong class="brand">wordlebot admin</strong>
+  {% if user %}
+  <nav>
+    {% for href, label in [("/", "Dashboard"), ("/scores", "Scores"), ("/config", "Config"), ("/audit", "Audit log"), ("/account", "Account")] %}
+    <a href="{{ href }}"{% if path == href or (href != "/" and path.startswith(href)) %} aria-current="page"{% endif %}>{{ label }}</a>
+    {% endfor %}
+  </nav>
+  <form method="post" action="/logout" class="inline">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="link">Sign out {{ user }}</button>
+  </form>
+  {% endif %}
+</header>
+<main>
+  {% if flash %}<p class="flash" role="status">{{ flash }}</p>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

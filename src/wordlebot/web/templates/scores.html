@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Scores</h1>
+<form method="get" action="/scores" class="toolbar">
+  <label>Puzzle <input name="puzzle" inputmode="numeric" value="{{ puzzle if puzzle is not none else '' }}" size="8"></label>
+  <button class="secondary">Show</button>
+  {% if puzzle is not none %}
+  <a href="/scores?puzzle={{ puzzle - 1 }}">← {{ "{:,}".format(puzzle - 1) }}</a>
+  {% if puzzle < today_number + 1 %}<a href="/scores?puzzle={{ puzzle + 1 }}">{{ "{:,}".format(puzzle + 1) }} →</a>{% endif %}
+  {% endif %}
+  <span class="spacer"></span>
+  <a href="/scores/add">Add a score</a>
+  <a href="/scores/deleted">Deleted scores</a>
+</form>
+<form method="get" action="/scores" class="toolbar">
+  <label>Player
+    <select name="user">
+      {% for uid, name, count in players %}<option value="{{ uid }}"{% if uid == user_id %} selected{% endif %}>{{ name }} ({{ count }})</option>{% endfor %}
+    </select>
+  </label>
+  <button class="secondary">Show</button>
+</form>
+
+<h2>{{ title }}</h2>
+{% if starter or answer %}
+<p>Starter: {% if starter %}<code>{{ starter.word | upper }}</code>{% else %}none{% endif %}
+{% if answer %} · Answer: <span class="spoiler" tabindex="0">{{ answer | upper }}</span>{% endif %}</p>
+{% endif %}
+{% if rows %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Puzzle</th><th>Player</th><th>Score</th><th>Grid</th><th>Submitted</th><th>Actions</th></tr></thead>
+  <tbody>
+  {% for s in rows %}
+  <tr>
+    <td><a href="/scores?puzzle={{ s.puzzle_number }}">{{ "{:,}".format(s.puzzle_number) }}</a></td>
+    <td><a href="/scores?user={{ s.user_id }}">{{ s.user_name }}</a><br><small class="muted">{{ s.user_id }}</small></td>
+    <td><span class="status {{ s.status }}">{{ s | score }}</span></td>
+    <td><pre class="grid-marks">{{ s.grid | squares }}</pre></td>
+    <td>{{ s.submitted_at | local }}</td>
+    <td class="row-actions">
+      <form method="post" action="/scores/edit">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="puzzle" value="{{ s.puzzle_number }}">
+        <input type="hidden" name="user_id" value="{{ s.user_id }}">
+        <select name="status" aria-label="New status">
+          {% for st in statuses %}{% if st != s.status %}<option>{{ st }}</option>{% endif %}{% endfor %}
+        </select>
+        <button name="action" value="override" class="secondary">Set status</button>
+        <button name="action" value="reverify" class="secondary">Re-verify</button>
+        <button name="action" value="delete" class="danger">Delete</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="muted">Re-verify sets the status the rules give it now, undoing an override.</p>
+{% else %}
+<p class="muted">No scores.</p>
+{% endif %}
+{% endblock %}

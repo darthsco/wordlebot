@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<form method="post" action="/login/enroll" class="card narrow" hx-boost="false">
+  <h1>Set up two-factor sign-in</h1>
+  <p>Two-factor sign-in is required. Scan this with an authenticator app, then enter the code it shows.</p>
+  <div class="qr">{{ enrollment.qr_svg | safe }}</div>
+  <details><summary>Can't scan it?</summary><p>Enter this key manually: <code class="secret">{{ enrollment.secret }}</code></p></details>
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>6-digit code <input name="code" inputmode="numeric" pattern="[0-9 ]{6,7}" autocomplete="one-time-code" required autofocus></label>
+  <button>Confirm and sign in</button>
+  <p class="muted"><a href="/login">Start over</a></p>
+</form>
+{% endblock %}

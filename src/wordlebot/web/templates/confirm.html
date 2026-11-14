@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+{% set e = preview.edit %}
+{% set s = e.score %}
+<h1>Confirm: {{ labels[e.action] }}</h1>
+<section class="card">
+  <dl>
+    <dt>Player</dt><dd>{{ s.user_name }} <small class="muted">({{ s.user_id }})</small></dd>
+    <dt>Puzzle</dt><dd>Wordle {{ "{:,}".format(s.puzzle_number) }}</dd>
+    {% if e.before %}<dt>Now</dt><dd>{{ e.before | score }}</dd>{% endif %}
+    <dt>After</dt><dd>{% if e.after %}{{ e.after | score }}{% else %}removed (kept under Deleted scores){% endif %}</dd>
+  </dl>
+  <h2>All-time standing</h2>
+  <table class="compact">
+    <thead><tr><th></th><th>Rank</th><th>Average</th><th>Games</th></tr></thead>
+    <tbody>
+    {% for label, st in [("Before", preview.before), ("After", preview.after)] %}
+    <tr><th>{{ label }}</th>
+      {% if st %}<td>{{ st.rank if st.rank is not none else "unranked" }}</td><td>{{ "%.2f" | format(st.average) }}</td><td>{{ st.games }}</td>
+      {% else %}<td colspan="3" class="muted">not on the board</td>{% endif %}
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+<form method="post" action="/scores/edit" class="card">
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  {# A textarea, as browsers may strip line breaks from an input's value. #}
+  {% for k, v in fields.items() %}{% if k == "share" %}<textarea name="share" hidden>{{ v }}</textarea>{% elif k != "reason" %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endif %}{% endfor %}
+  <input type="hidden" name="confirm" value="yes">
+  <label>Reason (goes in the audit log) <input name="reason" maxlength="500" value="{{ fields.reason }}" required autofocus></label>
+  <button class="{{ 'danger' if e.action == 'delete' else '' }}">{{ labels[e.action] }}</button>
+  <a href="/scores?puzzle={{ s.puzzle_number }}">Cancel</a>
+</form>
+{% endblock %}

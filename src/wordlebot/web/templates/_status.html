@@ -1,0 +1,41 @@
+{% set o = overview %}
+{% if overrides_error %}<p class="error">Config overrides are being ignored because they no longer validate: {{ overrides_error }}. Fix them on the <a href="/config">Config</a> page.</p>{% endif %}
+<div class="grid">
+  <section class="card">
+    <h2>Bot</h2>
+    <dl>
+      <dt>Discord</dt><dd>{% if connected %}<span class="ok">connected</span> as {{ bot_user }}{% if latency is not none %} ({{ latency | round | int }} ms){% endif %}{% else %}<span class="bad">not connected</span>{% endif %}</dd>
+      <dt>Uptime</dt><dd>{{ uptime }}</dd>
+      <dt>Version</dt><dd>{{ version }}</dd>
+      <dt>Bot time</dt><dd>{{ o.now.strftime("%Y-%m-%d %H:%M %Z") }}</dd>
+    </dl>
+  </section>
+  <section class="card">
+    <h2>Starters</h2>
+    <dl>
+      <dt>Today</dt><dd>{% if o.current %}#{{ "{:,}".format(o.current.puzzle_number) }} <code>{{ o.current.word | upper }}</code> · {{ o.submissions_current }} submission(s){% else %}none{% endif %}</dd>
+      <dt>Upcoming</dt><dd>{% if o.upcoming %}#{{ "{:,}".format(o.upcoming.puzzle_number) }} <code>{{ o.upcoming.word | upper }}</code>{% if not o.upcoming.announced %} <span class="bad">(not announced yet)</span>{% endif %}{% else %}not picked yet{% endif %} · {{ o.submissions_upcoming }} submission(s)</dd>
+      <dt>Next daily post</dt><dd>{{ o.next_post_at.strftime("%a %b %d %H:%M") }}</dd>
+      <dt>Owed now</dt><dd>{% if o.due %}<span class="bad">{% for d in o.due %}{{ d.kind }} for {{ d.target }}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% else %}nothing{% endif %}</dd>
+    </dl>
+  </section>
+  <section class="card">
+    <h2>Solutions &amp; scores</h2>
+    <dl>
+      <dt>Cached</dt><dd>{{ o.solutions_cached }} solution(s), latest {{ o.latest_solution or "none" }}</dd>
+      <dt>Today's</dt><dd>{% if o.today_solution_cached %}<span class="ok">cached</span>{% else %}<span class="bad">not cached yet</span>{% endif %}</dd>
+      <dt>Pending scores</dt><dd>{{ o.pending_scores }}</dd>
+    </dl>
+  </section>
+  <section class="card">
+    <h2>Recent answers</h2>
+    {% if o.visible_answers %}
+    <ul class="plain">
+      {% for starter, answer in o.visible_answers %}
+      <li>#{{ "{:,}".format(starter.puzzle_number) }}: <code>{{ starter.word | upper }}</code> → <span class="spoiler" tabindex="0">{{ answer | upper }}</span></li>
+      {% endfor %}
+    </ul>
+    {% else %}<p class="muted">None yet.</p>{% endif %}
+    <p class="muted">Answers appear 2 days after their puzzle. Hover or focus to reveal.</p>
+  </section>
+</div>

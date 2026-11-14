@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Config</h1>
+{% if overrides_error %}<p class="error">The stored overrides no longer validate against config.toml, so the bot is running on the file alone: {{ overrides_error }}. Reset the offending keys below.</p>{% endif %}
+<p class="muted">Edits are saved as overrides on top of <code>config.toml</code> and take effect at once. Greyed-out settings can only be changed in <code>config.toml</code>, followed by a restart.</p>
+{% for section, rows in sections.items() %}
+<section class="card">
+  <h2>[{{ section }}]</h2>
+  <table class="config">
+    <tbody>
+    {% for r in rows %}
+    <tr id="{{ section }}-{{ r.key }}" class="{{ 'readonly' if not r.editable else '' }}">
+      <th>{{ r.key }}</th>
+      {% if r.editable %}
+      <td>
+        <form method="post" action="/config" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="section" value="{{ section }}">
+          <input type="hidden" name="key" value="{{ r.key }}">
+          {% if r.value is sameas true or r.value is sameas false %}
+          <select name="value"><option{% if r.value %} selected{% endif %}>true</option><option{% if not r.value %} selected{% endif %}>false</option></select>
+          {% elif r.value is iterable and r.value is not string %}
+          <input name="value" value="{{ r.value | join(', ') }}" placeholder="comma-separated IDs">
+          {% else %}
+          <input name="value" value="{{ r.value }}">
+          {% endif %}
+          <button class="secondary">Save</button>
+        </form>
+        {% if r.overridden %}
+        <form method="post" action="/config" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="section" value="{{ section }}">
+          <input type="hidden" name="key" value="{{ r.key }}">
+          <input type="hidden" name="reset" value="yes">
+          <button class="link">Reset to file ({{ r.file_value }})</button>
+        </form>
+        <small class="muted">overridden by {{ r.updated[1] }}, {{ r.updated[0] | local }}</small>
+        {% endif %}
+      </td>
+      {% else %}
+      <td><code>{{ r.value }}</code></td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endfor %}
+{% endblock %}

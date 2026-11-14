@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Add a score</h1>
+<p>For a share the bot missed, e.g. one posted while it was offline. It is verified against the starter like any other share.</p>
+<form method="post" action="/scores/edit" class="card">
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="action" value="add">
+  <label>Discord user ID <input name="user_id" inputmode="numeric" value="{{ form.get('user_id', '') }}" required></label>
+  <label>Display name <input name="user_name" value="{{ form.get('user_name', '') }}" required></label>
+  <label>Share text <textarea name="share" rows="9" required>{{ form.get('share', '') }}</textarea></label>
+  <button>Preview</button>
+</form>
+{% endblock %}
