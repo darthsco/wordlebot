@@ -26,6 +26,7 @@ A Discord bot for friendly Wordle competition. Every evening it posts **tomorrow
   Shares are normally checked on the spot. A ⏳ is swapped for the outcome automatically once the bot can check it. Shares for puzzles that can't have been played yet get no reaction.
 
 - **Leaderboards** for daily, rolling weekly, monthly and all-time. A failed puzzle (X/6) counts as 7. Each board has a configurable minimum number of games to be ranked (defaults: 3 weekly, 7 monthly, 5 all-time; early in a week or month the minimum is capped at the puzzles so far). Players below it are listed under the board, unranked. Ties share a rank.
+- **Admin panel (optional):** a two-factor, HTTPS-only web panel for the dashboard, rerolls, score moderation, live config edits and an audit log. See [Admin panel](#admin-panel-optional).
 - **No pings:** the bot never mentions anyone, and display names are escaped so they can't ping or break formatting.
 
 ## Slash commands
@@ -168,9 +169,55 @@ The timer runs at 7, 22, 37 and 52 minutes past each hour, so it doesn't fire at
 
 To change the schedule, edit the `OnCalendar` line in `/etc/systemd/system/wordlebot-update.timer` (for example, `hourly`), then run `sudo systemctl daemon-reload && sudo systemctl restart wordlebot-update.timer`. To turn it off, run `sudo systemctl disable --now wordlebot-update.timer`.
 
+## Admin panel (optional)
+
+A web control panel served by the bot itself, for admins only. It is off by default.
+
+- **Dashboard:** Discord connection, uptime, version, today's and the upcoming starter, the next post time, anything owed, the solution cache, and pending scores. It refreshes every 30 seconds. Answers appear only once they could appear in Discord (2 days later), blurred until you hover.
+- **Actions:** reroll the upcoming starter (with the same guards as `/reroll`), run a posting tick now, and sync solutions to settle pending scores.
+- **Scores:** browse by puzzle or player. You can delete a score (it's kept and can be restored), set its status by hand, re-verify it by the rules (undoing a manual status), or add one from a member's share text when the bot missed it. Every change shows a preview first, including the player's all-time rank before and after, and needs a reason. The share's reaction in Discord is updated to match.
+- **Config:** edit the settings that can change while the bot runs: schedule time and offset, selection, scores, `fail_score`, `admin_role_ids` and announcements. They take effect at once and are stored as overrides in the database on top of `config.toml`, which stays read-only. Each overridden setting can be reset to the file's value. The rest (guild and channel, timezone, game rules, paths, the solution source, `[web]`) are shown read-only; change those in `config.toml` and restart.
+- **Announcements:** each kind of admin action can post a note in the channel. Each one has its own switch in `[announce]`, all off by default. Notes name the admin but never the reason.
+- **Audit log:** every sign-in, failed sign-in, lockout and admin change, with who, when, from where and why.
+
+### Security
+
+- **HTTPS only.** The panel speaks plain HTTP to a reverse proxy (Caddy, included) that holds the certificate. The bot refuses any request that didn't arrive over HTTPS through the proxy, so the panel's port must never be published or reachable by anyone else. The compose file keeps it on the internal network.
+- **Two-factor sign-in is required.** Each admin signs in with a password (12+ characters, stored as a scrypt hash), then a code from an authenticator app. At first sign-in they scan a QR code to set it up. Codes can't be reused.
+- **Sessions** last 12 hours at most and end after 1 hour without activity. Both are configurable in `[web]`. Cookies are `Secure`, `HttpOnly` and `SameSite=Strict`, every form carries a CSRF token, and cross-origin posts are refused. *Sign out everywhere* is on the Account page, and changing your password signs out your other sessions.
+- **Rate limiting:** 5 failed attempts (password or code) for a username, or from an address, lock it out for 15 minutes.
+- **Accounts are managed on the host only**, so a compromised panel login can't create more admins:
+
+  ```sh
+  docker compose run --rm wordlebot admin add NAME        # asks for a password
+  docker compose run --rm wordlebot admin list
+  docker compose run --rm wordlebot admin passwd NAME     # also signs them out
+  docker compose run --rm wordlebot admin reset-2fa NAME  # lost authenticator: set up again at next sign-in
+  docker compose run --rm wordlebot admin remove NAME
+  ```
+
+  Without Docker, use `.venv/bin/python -m wordlebot admin ...`. Set up two-factor right after adding an admin: until then, anyone with the password could enroll their own authenticator.
+
+### Setting it up
+
+1. Point a DNS name (e.g. `wordlebot.example.com`) at the host, and open ports 80 and 443. Caddy uses them to get and renew a Let's Encrypt certificate, and redirects HTTP to HTTPS.
+2. In `config.toml`, set `enabled = true` under `[web]`. Leave `host` and `port` alone for Docker; the image listens on all interfaces inside the container.
+3. In `.env`, add:
+
+   ```sh
+   COMPOSE_PROFILES=web
+   PANEL_DOMAIN=wordlebot.example.com
+   ```
+
+4. Create an admin: `docker compose run --rm wordlebot admin add NAME`.
+5. Run `docker compose up -d` (or `./update.sh --force`), then open `https://wordlebot.example.com` and sign in.
+
+If you changed `port` in `[web]`, also set `PANEL_UPSTREAM_PORT` to the same value in `.env`. Certificates live in the `caddy-data` volume; keep it, as Let's Encrypt limits how often a domain can get new ones. To use your own proxy instead of Caddy, make it terminate TLS, set `X-Forwarded-Proto: https`, *replace* any client-sent `X-Forwarded-For` with the client's address, pass the `Host` header through, and keep the bot's port private.
+
 ## Upgrading an existing install
 
 - **Database:** nothing to do. The bot migrates its SQLite database when it starts.
+- **Admin panel:** off until you enable it; see [Admin panel](#admin-panel-optional). A new install of it needs the `web` compose profile and a domain.
 - **Config:** nothing to add; new settings have defaults. Startup is stricter, though: the bot now refuses to run with an invalid value or with `guild_id`/`channel_id` unset. Weekly and monthly leaderboards now have minimum games (3 and 7); change `min_games_weekly` and `min_games_monthly` if you prefer otherwise.
 - **Update timer:** if you installed the systemd timer with `OnCalendar=*:0/15`, it fires at the same moment as the default 20:00 post. Change that line in `/etc/systemd/system/wordlebot-update.timer` to `OnCalendar=*:7/15`, then run `sudo systemctl daemon-reload && sudo systemctl restart wordlebot-update.timer`.
 - **`update.sh`:** its first run after upgrading does one build-and-up to record the deployed commit, even with no new commits.

@@ -1,0 +1,8 @@
+# HTTPS front end for the admin panel (compose profile "web", see README).
+# Caddy gets and renews a Let's Encrypt certificate for PANEL_DOMAIN, redirects
+# HTTP to HTTPS, and passes requests to the bot with X-Forwarded-Proto/-For set.
+# Client-sent X-Forwarded-* headers are replaced, so the bot can trust them.
+{$PANEL_DOMAIN} {
+	encode gzip
+	reverse_proxy wordlebot:{$PANEL_UPSTREAM_PORT:8080}
+}

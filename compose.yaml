@@ -29,5 +29,37 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # HTTPS reverse proxy for the admin panel. Only started with the "web" profile
+  # (COMPOSE_PROFILES=web in .env). The bot's panel port is never published: only
+  # Caddy reaches it, over the compose network.
+  caddy:
+    image: caddy:2.10-alpine
+    profiles: [web]
+    restart: unless-stopped
+    depends_on: [wordlebot]
+    environment:
+      # Unset, Caddy serves only "localhost" with its own untrusted certificate.
+      PANEL_DOMAIN: ${PANEL_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - type: bind
+        source: ./Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind:
+          create_host_path: false
+      - caddy-data:/data      # certificates; keep it, or Let's Encrypt rate limits bite
+      - caddy-config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   wordlebot-state:
+  caddy-data:
+  caddy-config:
