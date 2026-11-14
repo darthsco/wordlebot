@@ -5,7 +5,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     WORDLEBOT_CONFIG=/app/config.toml \
-    WORDLEBOT_DATABASE_PATH=/app/state/wordlebot.sqlite3
+    WORDLEBOT_DATABASE_PATH=/app/state/wordlebot.sqlite3 \
+    WORDLEBOT_WEB_HOST=0.0.0.0
 
 WORKDIR /app
 

@@ -10,6 +10,7 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m wordlebot sync   # refresh solution cache, exit
 .venv/bin/python -m wordlebot pick   # dry-run: print the starter that would be chosen
 .venv/bin/python -m wordlebot        # run the bot (needs DISCORD_TOKEN in .env, config.toml)
+.venv/bin/python -m wordlebot admin add NAME   # panel accounts: list | add | passwd | reset-2fa | remove
 ```
 
 ## Config
@@ -60,13 +61,26 @@ A share's first grid row must equal `feedback(starter, solution)`. `WordleServic
 
 - Lifecycle: `pending` → `verified` | `mismatch` | `no_starter`. `pending` means the solution isn't cached yet **or the starter isn't picked yet but still can be**. `no_starter` is final: no starter exists and none can come.
 - Early shares are normal: members in timezones ahead of the bot play tomorrow's puzzle before the evening post. Puzzle numbers 0..today+1 are accepted; anything else is ignored without a reaction.
-- Pending scores are settled by `reverify_pending`, which runs on every refresh and after every `post_due`. Settled scores queue in the service; the bot drains them with `take_resolved()` and swaps the ⏳ reaction for the outcome, using the `channel_id`/`message_id` stored on the score (NULL on rows older than those columns, which are skipped). Call `bot._update_reactions()` after any new code path that can settle scores.
+- Pending scores are settled by `reverify_pending`, which runs on every refresh and after every `post_due`. Settled scores queue in the service as `ReactionUpdate`s (so do panel edits); the bot drains them with `take_reaction_updates()` and swaps the old reaction (⏳ when settling) for the outcome, using the `channel_id`/`message_id` stored on the score (NULL on rows older than those columns, which are skipped). Call `bot._update_reactions()` after any new code path that can settle scores.
 - Only `verified` counts on leaderboards; `count_unverified` adds `pending`, never `mismatch` or `no_starter`. One submission per user per puzzle; first wins. X/6 scores as `fail_score`.
 - Parser tolerances (quotes, spoiler tags, trailing text, locale thousands separators, several headers in one message) are pinned by `tests/test_scores.py`.
 
 ## Standings
 
 Competition ranking (1, 2, 2, 4), decided on lower average, then more games; a tie is the same average over the same number of games. Each board has a minimum (`min_games_*`); the weekly and monthly ones are capped at the puzzles in the period so far. Players below it are listed unranked under the board. A player's name is the one on their most recently submitted score.
+
+## Admin panel
+
+Off unless `[web] enabled`. `__main__._run` starts it (`web.start`) next to the bot, in the same event loop.
+
+- **HTTPS is the proxy's job.** The app serves plain HTTP and refuses any request without `X-Forwarded-Proto: https`. It trusts `X-Forwarded-For` (last entry) as the client address for rate limiting and the audit log. Both are safe only because the port is reachable by Caddy alone (unpublished in compose; Caddy replaces client-sent `X-Forwarded-*`). Never publish the port.
+- **Login** (`auth.Auth`): scrypt password, then a partial session (stage `totp`, or `enroll` for an admin without an authenticator yet; 5 minutes), then a code, which replaces it with a full session under a **new token**. TOTP is mandatory. `totp_last_step` refuses a reused code. Only `sha256(token)` is stored. Failures (password or code) are counted per `user:` and `ip:` key in `login_failures`; either key reaching `login_max_failures` within `login_lockout_minutes` locks out. Unknown usernames are checked against a dummy hash, so their timing matches a wrong password.
+- **Requests**: `__Host-` cookie (Secure, HttpOnly, SameSite=Strict), a CSRF token per session on every signed-in POST, an `Origin` check on every POST (including `/login`), and strict CSP (no inline script or style; htmx is vendored in `web/static` with its inline indicator styles off). The `/status` poll doesn't refresh the idle timer.
+- **Accounts are CLI-only** (`python -m wordlebot admin ...`). The panel can't create admins.
+- **Score edits** are `plan_*` → `preview` → `apply_edit`. The confirm POST plans again from the same form fields, and `apply_edit` refuses if the stored row differs from the plan's `before`. Every edit needs a reason and is audited. Deletes move the row to `deleted_scores`, and a restore re-decides the status with `_status`. A status change queues a `ReactionUpdate` (previous → current emoji); call `bot._update_reactions()` after one, as for settled scores.
+- **Config overrides** live in `config_overrides` (JSON values) and are layered over the file by `config.with_overrides`, which validates the result. `service.file_config` is the file and `service.config` the effective config, which `bot.config` reads through. Only keys in `config.EDITABLE` are editable; anything else is read-only in the panel, and a stored override for a key no longer editable is ignored. If the stored overrides stop validating (the file changed), `load_overrides` runs on the file alone and the panel shows `overrides_error`.
+- **Audit**: everything the panel changes, every sign-in event and every CLI account change goes through `db.audit`. Announcements (`[announce]`, per action, off by default) never include the reason, and escape the admin's name.
+- **Spoilers**: the panel follows the same rule as Discord. Solutions are shown only via `answer_for_panel`/`overview().visible_answers`, which use `answer_visible`.
 
 ## Configurability scaffolding
 
@@ -84,7 +98,8 @@ Competition ranking (1, 2, 2, 4), decided on lower average, then more games; a t
 
 `Dockerfile` + `compose.yaml` + `update.sh` (run by a systemd timer, see README).
 
-- Env overrides: `WORDLEBOT_CONFIG` (config path) and `WORDLEBOT_DATABASE_PATH` (beats `[storage].database_path`); the image sets both so state lands in the `/app/state` volume.
+- Env overrides: `WORDLEBOT_CONFIG` (config path), `WORDLEBOT_DATABASE_PATH` (beats `[storage].database_path`) and `WORDLEBOT_WEB_HOST` (beats `[web].host`). The image sets all three, so state lands in the `/app/state` volume and the panel listens on the container's interfaces.
+- The `caddy` service (profile `web`, enabled by `COMPOSE_PROFILES=web` in `.env`) terminates TLS for `PANEL_DOMAIN` using `Caddyfile`, and proxies to `wordlebot:8080`.
 - The image installs runtime deps from `requirements.txt` (exact pins including transitives, resolved inside `python:3.13-slim`), then `pip install --no-deps .` and `pip check`, so timer rebuilds never pull new releases. A dependency change goes in `pyproject.toml` (loose range) **and** `requirements.txt`; the regeneration command is in that file's header.
 - `/version` reports `WORDLEBOT_COMMIT`, baked in by `update.sh` → compose build arg `GIT_COMMIT` → `ENV` in the image's last layer (the image has no `.git`). Since the SHA is in the image, every commit changes it, so `update.sh` recreates the container even for docs-only commits.
 - `tzdata` is a dependency because slim images ship no zoneinfo database.
