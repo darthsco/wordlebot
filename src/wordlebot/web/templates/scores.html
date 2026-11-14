@@ -14,7 +14,8 @@
 </form>
 <form method="get" action="/scores" class="toolbar">
   <label>Player
-    <select name="user">
+    <select name="user" required>
+      <option value=""{% if user_id is none %} selected{% endif %} disabled>Choose a player…</option>
       {% for uid, name, count in players %}<option value="{{ uid }}"{% if uid == user_id %} selected{% endif %}>{{ name }} ({{ count }})</option>{% endfor %}
     </select>
   </label>
