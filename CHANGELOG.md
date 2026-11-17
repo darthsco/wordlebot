@@ -1,0 +1,40 @@
+# Changelog
+
+Notable changes to wordlebot. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
+
+What counts as a breaking change: anything that makes an operator or player change what they do. That means renamed or removed `config.toml` keys or `WORDLEBOT_*` variables, a database that can't be migrated forward automatically, a changed CLI command, or a removed slash command or behaviour players rely on. Before 1.0, a breaking change bumps the minor version.
+
+## [Unreleased]
+
+## [0.2.0] - 2026-11-16
+
+The first tagged release. It covers everything since the project began; `0.1.0` was never tagged.
+
+### Added
+
+- A daily shared starter, posted to one channel at a configured time and picked by configurable strategies with exclusion windows for recent starters and past solutions.
+- A solution cache synced from the NYT. It stores answers only up to today, so future answers are never saved.
+- Pasted share results are checked against the starter and ranked. Results stay pending until they can be checked, and reactions show the outcome.
+- Leaderboards (all-time, weekly, monthly) with competition ranking and minimum-game thresholds (`min_games_weekly`, `min_games_monthly`).
+- Slash commands that answer by DM, including `/reroll`, `/results`, `/leaderboard`, `/history` and `/version`.
+- An optional admin panel (`[web] enabled`) with password and mandatory TOTP login. It covers score moderation with previews and required reasons, config overrides, an audit log and admin actions. Optional channel announcements (`[announce]`) are off by default.
+- `python -m wordlebot admin list|add|passwd|reset-2fa|remove` to manage panel accounts from the host.
+- Docker deployment: `Dockerfile`, `compose.yaml`, pinned `requirements.txt`, Caddy for the panel's HTTPS (compose profile `web`), and `update.sh` with a systemd timer for automatic redeploys.
+
+### Changed
+
+- Posting is a 60-second reconciler, so a missed or failed post is made up later, never as a different word.
+- Config is validated at startup, with every problem reported together. `run` requires the config file and nonzero `guild_id`/`channel_id`.
+
+### Fixed
+
+- The panel's login form was refused as cross-origin in real browsers, because of `Referrer-Policy: no-referrer`.
+- The panel showed hidden form fields and Discord markdown on the dashboard.
+- A starter rerolled before the upgrade to `daily_posts` lost its 20:00 reminder.
+
+### Upgrading
+
+See [Upgrading an existing install](README.md#upgrading-an-existing-install). The database migrates itself, and new settings have defaults.
+
+[Unreleased]: https://github.com/darthsco/wordlebot/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/darthsco/wordlebot/releases/tag/v0.2.0

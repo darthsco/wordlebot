@@ -1,6 +1,6 @@
 [project]
 name = "wordlebot"
-version = "0.1.0"
+version = "0.2.0"
 description = "Discord bot that posts a shared daily Wordle starting word and tracks scores"
 requires-python = ">=3.12"
 dependencies = [
