@@ -38,6 +38,14 @@ CREATE TABLE IF NOT EXISTS daily_posts (
     completed_at  TEXT              -- when the starter (or reminder) was sent
 );
 
+-- Golf leaderboards posted, one per round milestone: holes = 9 (front nine) or 18.
+CREATE TABLE IF NOT EXISTS golf_posts (
+    first_puzzle  INTEGER NOT NULL, -- the round's hole 1
+    holes         INTEGER NOT NULL,
+    posted_at     TEXT NOT NULL,
+    PRIMARY KEY (first_puzzle, holes)
+);
+
 -- Words a date's starter was rerolled away from, so a later reroll can't bring
 -- one back. Members may already have seen (or opened with) any of them.
 CREATE TABLE IF NOT EXISTS retired_starters (
@@ -206,9 +214,12 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         upgrading = self._has_table("starters") and not self._has_table("daily_posts")
+        adding_golf = self._has_table("starters") and not self._has_table("golf_posts")
         self.conn.executescript(SCHEMA)
         if upgrading:
             self._backfill_daily_posts(schedule or ScheduleConfig())
+        if adding_golf:
+            self._backfill_golf_posts(schedule or ScheduleConfig())
         self._add_score_message_columns()
 
     def _has_table(self, name: str) -> bool:
@@ -237,6 +248,28 @@ class Database:
                 done.append((target_iso, posted_at, posted_at))
         with self.conn:
             self.conn.executemany("INSERT OR IGNORE INTO daily_posts VALUES (?, ?, ?)", done)
+
+    def _backfill_golf_posts(self, schedule: ScheduleConfig) -> None:
+        """Migrate a database from before golf: the latest round milestone whose
+        morning post would have been before today counts as posted, so upgrading
+        doesn't post a stale leaderboard. One due this morning is still posted.
+        """
+        from .golf import latest_milestone  # golf -> leaderboard -> db
+
+        row = self.conn.execute(
+            "SELECT target_date, puzzle_number FROM starters ORDER BY target_date LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return
+        anchor = row["puzzle_number"]
+        launch = date.fromisoformat(row["target_date"]) - timedelta(days=anchor)
+        today = datetime.now(schedule.tz).date()
+        # A milestone is posted the day after its last hole, so one posted before
+        # today ended two or more days ago.
+        milestone = latest_milestone(anchor, (today - launch).days - 2)
+        if milestone is not None:
+            with self.conn:
+                self._stamp_golf_post(milestone.first, milestone.holes)
 
     def _add_score_message_columns(self) -> None:
         """Migrate a `scores` table from before submissions recorded their message.
@@ -418,6 +451,30 @@ class Database:
 
     def daily_post_completed(self, target: date) -> bool:
         return self._daily_post_stamp(target, "completed_at") is not None
+
+    # --- golf ------------------------------------------------------------
+
+    def first_starter_puzzle(self) -> int | None:
+        """Puzzle number of the earliest starter: hole 1 of golf round 1."""
+        row = self.conn.execute(
+            "SELECT puzzle_number FROM starters ORDER BY target_date LIMIT 1"
+        ).fetchone()
+        return row[0] if row else None
+
+    def _stamp_golf_post(self, first_puzzle: int, holes: int) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO golf_posts VALUES (?, ?, ?)", (first_puzzle, holes, _now())
+        )
+
+    def mark_golf_posted(self, first_puzzle: int, holes: int) -> None:
+        with self.conn:
+            self._stamp_golf_post(first_puzzle, holes)
+
+    def golf_posted(self, first_puzzle: int, holes: int) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM golf_posts WHERE first_puzzle = ? AND holes = ?", (first_puzzle, holes)
+        ).fetchone()
+        return row is not None
 
     # --- scores ----------------------------------------------------------
 

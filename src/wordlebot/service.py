@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, fields, replace
 from datetime import date, datetime, timedelta
 
-from . import leaderboard
+from . import golf, leaderboard
 from .config import Config, Overrides, is_editable, parse_value, with_overrides
 from .db import Database, DeletedScore, Score, Starter
 from .game import Mark, puzzle_date, puzzle_number
@@ -410,10 +410,14 @@ class WordleService:
         return due
 
     async def post_due(self, send: Send) -> list[DuePost]:
-        """Send whatever is owed and record it. Safe to call again after a failure."""
+        """Send whatever is owed and record it. Safe to call again after a failure.
+
+        Returns the daily posts that were owed; a golf post isn't one.
+        """
         now = self.now()  # read once, so a run near midnight can't change dates halfway
         due = self.due_posts(now)
-        if not due:
+        golf_due = self.due_golf(now)
+        if not due and golf_due is None:
             return []
         today = now.date()
         try:
@@ -421,6 +425,10 @@ class WordleService:
         except Exception:
             log.exception("Solution refresh failed; continuing with cached data")
         try:
+            if golf_due is not None:
+                # Settle the last hole's shares first, so the card counts them.
+                self.reverify_pending(today)
+                await self._post_golf(golf_due, send)
             for post in due:
                 await self._post(post, today, send)
         finally:
@@ -454,6 +462,58 @@ class WordleService:
         message_id = await send(prefix + starter_announcement(starter))
         self.db.mark_announced(target, message_id, daily_post=scheduled)
         log.info("Posted starter %s for %s (%s)", starter.word, target, post.kind)
+
+    # --- golf ------------------------------------------------------------
+    #
+    # Each puzzle is a hole, counted in rounds of 18 from the first starter's puzzle.
+    # The morning after a round's front nine, and after its 18th hole, the
+    # reconciler posts the round's card. Only the latest milestone is ever owed: if
+    # the bot misses one entirely, the next supersedes it rather than both posting.
+
+    def golf_anchor(self) -> int | None:
+        """Hole 1 of round 1; None until the bot has picked a starter."""
+        return self.db.first_starter_puzzle()
+
+    def due_golf(self, now: datetime | None = None) -> golf.Milestone | None:
+        """The golf milestone owed at `now`, if any."""
+        now = now or self.now()
+        anchor = self.golf_anchor()
+        if not self.config.golf.enabled or anchor is None:
+            return None
+        yesterday = puzzle_number(now.date() - timedelta(days=1), self.launch)
+        milestone = golf.latest_milestone(anchor, yesterday)
+        if milestone is None or self.db.golf_posted(milestone.first, milestone.holes):
+            return None
+        post_day = puzzle_date(milestone.last, self.launch) + timedelta(days=1)
+        post_at = datetime.combine(
+            post_day, self.config.golf.post_time_local(self.config.schedule.tz)
+        )
+        return milestone if now >= post_at else None
+
+    def golf_report(self, milestone: golf.Milestone) -> list[str]:
+        """The round's leaderboard and cards as of `milestone`, one message each."""
+        scores = self._counted(milestone.first, milestone.last)
+        ranked = golf.card(scores, milestone, self.config.game.fail_score)
+        return golf.format_round(milestone, ranked)
+
+    async def _post_golf(self, milestone: golf.Milestone, send: Send) -> None:
+        for message in self.golf_report(milestone):
+            await send(message)
+        self.db.mark_golf_posted(milestone.first, milestone.holes)
+        log.info("Posted golf round %d after %d holes", milestone.round_no, milestone.holes)
+
+    def golf_standings(self, today: date | None = None) -> str:
+        """`/golf`: the current round through the last puzzle that is over everywhere
+        (yesterday's), or the round that just ended."""
+        today = today or self.today()
+        anchor = self.golf_anchor()
+        if anchor is None:
+            return "Golf starts with the first starter the bot posts."
+        yesterday = puzzle_number(today - timedelta(days=1), self.launch)
+        milestone = golf.progress(anchor, yesterday)
+        if milestone is None:
+            return f"Golf round 1 tees off with Wordle {anchor:,}; check back the day after."
+        return "\n".join(self.golf_report(milestone))
 
     async def reroll(self, send: Send, actor: Actor | None = None) -> Starter:
         """Replace the upcoming starter and announce it.

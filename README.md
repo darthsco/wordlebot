@@ -26,6 +26,7 @@ A Discord bot for friendly Wordle competition. Every evening it posts **tomorrow
   Shares are normally checked on the spot. A ⏳ is swapped for the outcome automatically once the bot can check it. Shares for puzzles that can't have been played yet get no reaction.
 
 - **Leaderboards** for daily, rolling weekly, monthly and all-time. A failed puzzle (X/6) counts as 7. Each board has a configurable minimum number of games to be ranked (defaults: 3 weekly, 7 monthly, 5 all-time; early in a week or month the minimum is capped at the puzzles so far). Players below it are listed under the board, unranked. Ties share a rank.
+- **Golf:** every puzzle is a par-4 hole, and 18 in a row are a par-72 round, counted from the first puzzle the bot picked a starter for. Strokes are guesses; a failed hole (X) or one you didn't play (or that didn't verify) scores 7, like a fail. At 08:00 the morning after each front nine, the bot posts the round's leaderboard and hole-by-hole card. The morning after the 18th hole it posts the final and declares the winner (players tied for the lowest total are co-champions), and a new round begins. `[golf]` turns it off or moves the post time.
 - **Admin panel (optional):** a two-factor, HTTPS-only web panel for the dashboard, rerolls, score moderation, live config edits and an audit log. See [Admin panel](#admin-panel-optional).
 - **No pings:** the bot never mentions anyone, and display names are escaped so they can't ping or break formatting.
 
@@ -38,6 +39,7 @@ The bot sends replies by DM. If your DMs are closed, the reply appears only to y
 | `/starter` | Today's and the upcoming starting word |
 | `/results [puzzle]` | Results for one puzzle. Defaults to the puzzle the daily post reports on: today's, or yesterday's if `target_offset_days = 0` |
 | `/leaderboard <weekly\|monthly\|all-time>` | Standings |
+| `/golf` | The golf round in progress, through yesterday's puzzle (or the round that just ended) |
 | `/history [count]` | Our recent starters (default 10, up to 100). Answers appear behind spoiler tags 2 days after each puzzle |
 | `/config` | The bot's current settings |
 | `/version` | Which version and commit of the bot is running |

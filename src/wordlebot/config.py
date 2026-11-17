@@ -97,6 +97,16 @@ class WebConfig:
 
 
 @dataclass(frozen=True)
+class GolfConfig:
+    enabled: bool = True
+    post_time: str = "08:00"
+
+    def post_time_local(self, tz: ZoneInfo) -> time:
+        hour, minute = (int(p) for p in self.post_time.split(":"))
+        return time(hour, minute, tzinfo=tz)
+
+
+@dataclass(frozen=True)
 class AnnounceConfig:
     reroll: bool = False
     score_delete: bool = False
@@ -113,6 +123,7 @@ class Config:
     game: GameConfig = field(default_factory=GameConfig)
     selection: SelectionConfig = field(default_factory=SelectionConfig)
     scores: ScoresConfig = field(default_factory=ScoresConfig)
+    golf: GolfConfig = field(default_factory=GolfConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     solutions: SolutionsConfig = field(default_factory=SolutionsConfig)
     web: WebConfig = field(default_factory=WebConfig)
@@ -238,6 +249,9 @@ _RULES: dict[str, dict[str, Rule]] = {
         "min_games_monthly": _at_least(1),
         "min_games_all_time": _at_least(1),
     },
+    "golf": {
+        "post_time": (_is_post_time, "must be HH:MM in 24-hour time, e.g. \"08:00\""),
+    },
     "storage": {
         "database_path": _NON_EMPTY,
         "words_dir": _NON_EMPTY,
@@ -351,6 +365,7 @@ EDITABLE: dict[str, tuple[str, ...]] = {
     "game": ("fail_score",),
     "selection": tuple(f.name for f in fields(SelectionConfig)),
     "scores": tuple(f.name for f in fields(ScoresConfig)),
+    "golf": tuple(f.name for f in fields(GolfConfig)),
     "announce": tuple(f.name for f in fields(AnnounceConfig)),
 }
 

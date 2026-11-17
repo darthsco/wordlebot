@@ -42,6 +42,14 @@ min_games_weekly = 3
 min_games_monthly = 7
 min_games_all_time = 5
 
+[golf]
+# Every puzzle is a par-4 hole; 18 in a row are a par-72 round, counted from the first
+# puzzle the bot picked a starter for. A missed or failed hole scores fail_score.
+# The morning after each front nine and each full round, the bot posts the round's
+# leaderboard and hole-by-hole card (/golf shows it any time).
+enabled = true
+post_time = "08:00"       # HH:MM (24-hour), local to [schedule] timezone
+
 [storage]
 database_path = "wordlebot.sqlite3"
 words_dir = "data/words"

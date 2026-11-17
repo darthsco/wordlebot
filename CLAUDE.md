@@ -69,6 +69,15 @@ A share's first grid row must equal `feedback(starter, solution)`. `WordleServic
 
 Competition ranking (1, 2, 2, 4), decided on lower average, then more games; a tie is the same average over the same number of games. Each board has a minimum (`min_games_*`); the weekly and monthly ones are capped at the puzzles in the period so far. Players below it are listed unranked under the board. A player's name is the one on their most recently submitted score.
 
+## Golf
+
+`golf.py` (pure) plus `WordleService.due_golf`/`_post_golf`/`golf_standings`. Each puzzle is a par-4 hole. Rounds of 18 run back to back from `db.first_starter_puzzle()` (the anchor). A hole's strokes are its guesses; X and a missing (or non-counting) score are both `fail_score`. The players on a card are everyone with a counted score in the round so far, ranked by total (ties share a rank; tied leaders of a final are co-champions).
+
+- Milestones are each front nine and each full round. `post_due` sends the **latest** milestone once it is past `[golf] post_time` on the day after its last hole. `golf_posts` records it as sent. An older unposted milestone is superseded, never posted.
+- `Database.__init__` backfills `golf_posts` on an existing database (`_backfill_golf_posts`), so an upgrade never posts a stale round. Golf imports `leaderboard`, which imports `db`, so `db` imports golf inside that function.
+- Each card is its own `send`, so a code block is never split by `bot.chunks`. `/golf` joins them into one DM, which can split for a very large group.
+- Card names go through `golf._card_name` (no backticks, truncated); names outside the code block go through `escape_name`.
+
 ## Admin panel
 
 Off unless `[web] enabled`. `__main__._run` starts it (`web.start`) next to the bot, in the same event loop.

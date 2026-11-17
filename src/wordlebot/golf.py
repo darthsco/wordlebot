@@ -1,0 +1,200 @@
+"""Golf: every puzzle is a par-4 hole, and 18 in a row are a par-72 round.
+
+Pure logic, no I/O. Rounds run back to back from an anchor puzzle (the first one
+the bot ever picked a starter for): holes 1-9 are the front nine, 10-18 the back
+nine. A hole's strokes are its guesses; a failed hole (X) and a hole the player
+didn't play (or that didn't count, e.g. a mismatched starter) both score
+`fail_score`, so skipping never beats playing.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from .leaderboard import escape_name
+from .scores import effective_score
+
+if TYPE_CHECKING:
+    from .db import Score
+
+PAR = 4
+NINE = 9
+HOLES = 2 * NINE
+
+FAILED = "X"
+MISSED = "-"
+
+# Longest name shown on a card, which is monospace and should fit a phone.
+CARD_NAME_WIDTH = 12
+
+
+@dataclass(frozen=True)
+class Milestone:
+    """A point a round is reported at: after its front nine, or when it's over."""
+
+    round_no: int  # 1-based
+    first: int  # puzzle number of the round's hole 1
+    holes: int  # holes played so far, 1..HOLES
+
+    @property
+    def last(self) -> int:
+        return self.first + self.holes - 1
+
+    @property
+    def final(self) -> bool:
+        return self.holes == HOLES
+
+
+def round_start(number: int, anchor: int) -> int:
+    """Puzzle number of hole 1 of the round puzzle `number` belongs to."""
+    return anchor + (number - anchor) // HOLES * HOLES
+
+
+def round_no(number: int, anchor: int) -> int:
+    return (number - anchor) // HOLES + 1
+
+
+def progress(anchor: int, last_played: int) -> Milestone | None:
+    """The round in progress once puzzle `last_played` is over: its first puzzle and
+    how many holes are done. None before the first hole is over."""
+    if last_played < anchor:
+        return None
+    first = round_start(last_played, anchor)
+    return Milestone(round_no(last_played, anchor), first, last_played - first + 1)
+
+
+def latest_milestone(anchor: int, last_played: int) -> Milestone | None:
+    """The most recent nine to finish by puzzle `last_played` (a front nine or a
+    whole round); None before the first front nine is over."""
+    nines = (last_played - anchor + 1) // NINE
+    if nines < 1:
+        return None
+    last = anchor + nines * NINE - 1
+    first = round_start(last, anchor)
+    return Milestone(round_no(last, anchor), first, last - first + 1)
+
+
+@dataclass(frozen=True)
+class Player:
+    user_id: int
+    name: str  # raw; escape on the way out
+    cells: tuple[str, ...]  # per hole: guesses, FAILED or MISSED
+    strokes: tuple[int, ...]  # per hole
+
+    @property
+    def total(self) -> int:
+        return sum(self.strokes)
+
+    @property
+    def to_par(self) -> int:
+        return self.total - PAR * len(self.strokes)
+
+    @property
+    def played(self) -> int:
+        return sum(cell != MISSED for cell in self.cells)
+
+
+def card(scores: list[Score], milestone: Milestone, fail_score: int) -> list[tuple[int, Player]]:
+    """Everyone with a counted score in the round's holes so far, ranked by total
+    strokes ("1, 2, 2, 4"). `scores` must already be filtered to the ones that count."""
+    by_user: dict[int, dict[int, Score]] = defaultdict(dict)
+    for s in scores:
+        if milestone.first <= s.puzzle_number <= milestone.last:
+            by_user[s.user_id][s.puzzle_number] = s
+
+    players = []
+    for user_id, holes in by_user.items():
+        latest = max(holes.values(), key=lambda g: (g.submitted_at, g.puzzle_number))
+        cells, strokes = [], []
+        for number in range(milestone.first, milestone.last + 1):
+            score = holes.get(number)
+            if score is None:
+                cells.append(MISSED)
+                strokes.append(fail_score)
+            else:
+                cells.append(FAILED if score.guesses is None else str(score.guesses))
+                strokes.append(effective_score(score.guesses, fail_score))
+        players.append(Player(user_id, latest.user_name, tuple(cells), tuple(strokes)))
+
+    players.sort(key=lambda p: (p.total, p.name.lower(), p.user_id))
+    result: list[tuple[int, Player]] = []
+    for position, p in enumerate(players, 1):
+        tied = result and result[-1][1].total == p.total
+        result.append((result[-1][0] if tied else position, p))
+    return result
+
+
+def format_to_par(value: int) -> str:
+    return "E" if value == 0 else f"{value:+d}"
+
+
+def _card_name(name: str) -> str:
+    """A name made safe and short for a code block (no markdown applies inside one,
+    but a backtick would end it)."""
+    name = " ".join(name.split()).replace("`", "'")
+    if len(name) > CARD_NAME_WIDTH:
+        name = name[: CARD_NAME_WIDTH - 1] + "…"
+    return name
+
+
+def _block(lines: list[str]) -> str:
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
+def _position(rank: int, ranked: list[tuple[int, Player]]) -> str:
+    tied = sum(r == rank for r, _ in ranked) > 1
+    return f"T{rank}" if tied else str(rank)
+
+
+def format_round(milestone: Milestone, ranked: list[tuple[int, Player]]) -> list[str]:
+    """The round's leaderboard and hole-by-hole cards, one message each so no code
+    block is split across messages."""
+    m = milestone
+    par = PAR * m.holes
+    if m.final:
+        stage = "final"
+    elif m.holes == NINE:
+        stage = "after the front nine"
+    else:
+        stage = f"through {m.holes} hole{'s' if m.holes != 1 else ''}"
+    span = f"Wordle {m.first:,}" if m.holes == 1 else f"Wordle {m.first:,}–{m.last:,}"
+    header = f"⛳ **Golf round {m.round_no}, {stage}** ({span}, par {par})"
+    if not ranked:
+        return [f"{header}\nNo scores this round."]
+
+    leaders = [p for rank, p in ranked if rank == 1]
+    names = ", ".join(f"**{escape_name(p.name)}**" for p in leaders)
+    result = f"({format_to_par(leaders[0].to_par)}, {leaders[0].total})"
+    if m.final:
+        label = "🏆 Winner:" if len(leaders) == 1 else "🏆 Co-champions:"
+    else:
+        label = "Leader:" if len(leaders) == 1 else "Leaders:"
+
+    width = max(len(_card_name(p.name)) for _, p in ranked)
+    board = [f"{'Pos':<4}{'Name':<{width}}  {'TOT':>3}  {'PAR':>3}  {'PLD':>5}"]
+    for rank, p in ranked:
+        board.append(
+            f"{_position(rank, ranked):<4}{_card_name(p.name):<{width}}  "
+            f"{p.total:>3}  {format_to_par(p.to_par):>3}  {f'{p.played}/{m.holes}':>5}"
+        )
+    messages = [f"{header}\n{label} {names} {result}\n{_block(board)}"]
+
+    for start in range(0, m.holes, NINE):
+        holes = range(start, min(start + NINE, m.holes))
+        total_label = "OUT" if start == 0 else "IN"
+        lines = [
+            f"{'Hole':<{width}} " + "".join(f"{h + 1:>3}" for h in holes) + f" {total_label:>4}",
+            f"{'Par':<{width}} " + "".join(f"{PAR:>3}" for _ in holes) + f" {PAR * len(holes):>4}",
+        ]
+        for _, p in ranked:
+            lines.append(
+                f"{_card_name(p.name):<{width}} "
+                + "".join(f"{p.cells[h]:>3}" for h in holes)
+                + f" {sum(p.strokes[h] for h in holes):>4}"
+            )
+        messages.append(_block(lines))
+    if any(MISSED in p.cells for _, p in ranked) or any(FAILED in p.cells for _, p in ranked):
+        messages[-1] += f"\n{FAILED} = failed, {MISSED} = not played; both score as a fail."
+    return messages

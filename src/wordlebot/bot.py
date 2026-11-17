@@ -338,6 +338,12 @@ class WordleBot(discord.Client):
             await self._refresh_for_report()
             await self._dm(interaction, report())
 
+        @tree.command(description="The golf round in progress: par 4 a puzzle, 18 to a round")
+        @self._deferred
+        async def golf(interaction: discord.Interaction) -> None:
+            await self._refresh_for_report()
+            await self._dm(interaction, service.golf_standings())
+
         @tree.command(description="Our recent starting words")
         @app_commands.describe(count="How many to show (default 10)")
         @self._deferred
