@@ -106,3 +106,12 @@ Off unless `[web] enabled`. `__main__._run` starts it (`web.start`) next to the 
 - Stop signal is SIGINT (`STOPSIGNAL` in the image, repeated in compose): Python as PID 1 ignores SIGTERM. `main()` catches the `KeyboardInterrupt`, logs "Shutting down" and exits 0.
 - The `config.toml` bind mount uses `create_host_path: false`, so a missing file is an error instead of a root-owned directory.
 - `update.sh` deploys when HEAD differs from `.deployed-sha`, written only once the deploy is confirmed (container replaced and "Logged in as" seen in its logs, or container left unchanged by an image-neutral commit). `.deploy-pending` marks an unconfirmed deploy; the next run retries with `--force-recreate`. Both files are git-ignored. The login check greps for the `Logged in as` log line in `bot.on_ready`; keep the two in step.
+
+## Releasing
+
+SemVer; `CHANGELOG.md` (Keep a Changelog) defines what counts as breaking: config keys, `WORDLEBOT_*` variables, a DB that can't migrate forward, CLI commands, slash commands or behaviour players rely on. Before 1.0, breaking bumps minor; fixes bump patch.
+
+- Every user- or operator-visible change adds a line under `## [Unreleased]` in the same commit (Added / Changed / Fixed / Removed). Internal refactors and tests don't.
+- To release: rename `[Unreleased]` to `[X.Y.Z] - YYYY-MM-DD`, add a fresh empty `[Unreleased]`, update the compare links at the bottom, bump `version` in `pyproject.toml`, commit "Release X.Y.Z", then `git tag -a vX.Y.Z -m "wordlebot X.Y.Z"`. Push the commit and tag only when asked.
+- The version lives only in `pyproject.toml`; `/version` reads it from package metadata (no setuptools-scm: the image has no `.git`).
+- Tags are labels, not deploy gates: `update.sh` deploys every commit on `main`.
