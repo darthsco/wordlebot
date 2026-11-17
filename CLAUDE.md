@@ -113,5 +113,6 @@ SemVer; `CHANGELOG.md` (Keep a Changelog) defines what counts as breaking: confi
 
 - Every user- or operator-visible change adds a line under `## [Unreleased]` in the same commit (Added / Changed / Fixed / Removed). Internal refactors and tests don't.
 - To release: rename `[Unreleased]` to `[X.Y.Z] - YYYY-MM-DD`, add a fresh empty `[Unreleased]`, update the compare links at the bottom, bump `version` in `pyproject.toml`, commit "Release X.Y.Z", then `git tag -a vX.Y.Z -m "wordlebot X.Y.Z"`. Push the commit and tag only when asked.
+- After pushing a tag, create its GitHub release: `gh release create vX.Y.Z --verify-tag --title "wordlebot X.Y.Z" --notes-file NOTES --latest`, where NOTES is that version's `CHANGELOG.md` section (the lines after its heading, without the link references), with relative links like `(README.md#...)` rewritten to `https://github.com/darthsco/wordlebot/blob/vX.Y.Z/...` because they don't resolve on the release page.
 - The version lives only in `pyproject.toml`; `/version` reads it from package metadata (no setuptools-scm: the image has no `.git`).
 - Tags are labels, not deploy gates: `update.sh` deploys every commit on `main`.
