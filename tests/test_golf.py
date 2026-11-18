@@ -125,6 +125,11 @@ def test_long_names_are_truncated_on_the_card():
     assert "A" * (golf.CARD_NAME_WIDTH - 1) + "…" in messages[1]
 
 
+def test_hole_marks_follow_scorecard_names():
+    marks = [golf.hole_mark(c) for c in ["1", "2", "3", "4", "5", "6", "7", golf.FAILED, golf.MISSED]]
+    assert marks == ["ace", "eagle", "birdie", "par", "bogey", "double", "double", "failed", "missed"]
+
+
 def test_empty_round():
     assert "No scores this round." in format_round(Milestone(1, 100, 9), [])[0]
 

@@ -2,6 +2,9 @@
   --bg: #f6f7f8; --surface: #fff; --text: #1a1c1e; --muted: #5f6670; --border: #d8dce0;
   --accent: #3a7d44; --accent-text: #fff; --danger: #b3261e; --warn-bg: #fff4d6; --ok: #2e7d32; --bad: #b3261e;
   --flash-bg: #e7f3e9;
+  --fairway: #2f6b3a; --fairway-dark: #24532d; --fairway-line: #3f7f4b; --fairway-text: #fff;
+  --par-bg: #eef3ef; --sum-bg: #eef0f2; --under: #c62828; --over: #1f5fa8;
+  --gold: #e8b923; --gold-text: #3a2a00; --fail-bg: #fde4e2;
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
@@ -9,6 +12,9 @@
     --bg: #121416; --surface: #1c1f22; --text: #e6e8ea; --muted: #9aa1a9; --border: #33383d;
     --accent: #5aa065; --accent-text: #0d1a10; --danger: #ef6b62; --warn-bg: #3a3020; --ok: #7bc47f; --bad: #ef6b62;
     --flash-bg: #1f3324;
+    --fairway: #2c5a34; --fairway-dark: #22472a; --fairway-line: #3a6c43; --fairway-text: #eef6ef;
+    --par-bg: #1f2a22; --sum-bg: #262a2e; --under: #ff7a70; --over: #7fb0ec;
+    --gold: #e0b43a; --gold-text: #2a1f00; --fail-bg: #3d2220;
   }
 }
 * { box-sizing: border-box; }
@@ -73,8 +79,40 @@ tr.bad-row td { color: var(--bad); }
 ul.plain { list-style: none; padding: 0; margin: 0 0 8px; }
 code { font-family: ui-monospace, monospace; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
-section.card details { margin: 12px 0 0; }
-summary { cursor: pointer; color: var(--accent); }
-table.scorecard th, table.scorecard td { padding: 4px 7px; }
-table.scorecard tbody th { font-weight: 500; white-space: nowrap; }
-table.scorecard tr.par td { color: var(--muted); }
+
+/* Golf: a boxed 18-hole card, marked as scorecards are (circles under par, squares over). */
+.golf-round h2 { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.stage { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 8px; border-radius: 999px; background: var(--sum-bg); color: var(--muted); }
+.stage.final { background: var(--gold); color: var(--gold-text); }
+.stage.current { background: var(--fairway); color: var(--fairway-text); }
+.golf-board tr.leader td { font-weight: 600; }
+.topar.under { color: var(--under); font-weight: 600; }
+.topar.over { color: var(--over); }
+.golf-round details { margin: 14px 0 0; }
+.golf-round summary { cursor: pointer; color: var(--accent); font-weight: 600; margin-bottom: 8px; }
+.scorecard-wrap { overflow-x: auto; border: 2px solid var(--fairway); border-radius: 8px; }
+table.scorecard { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+.scorecard th, .scorecard td { border: 1px solid var(--border); padding: 3px 2px; text-align: center; vertical-align: middle; min-width: 2.3em; }
+.scorecard tr.holes th { background: var(--fairway); color: var(--fairway-text); border-color: var(--fairway-line); font-weight: 600; }
+.scorecard tr.holes a { color: inherit; text-decoration: none; }
+.scorecard tr.holes a:hover, .scorecard tr.holes a:focus { text-decoration: underline; }
+.scorecard tr.par td, .scorecard tr.par th { background: var(--par-bg); color: var(--muted); font-size: 0.85em; }
+.scorecard .name { text-align: left; padding: 3px 10px; white-space: nowrap; font-weight: 500; position: sticky; left: 0; z-index: 1; background: var(--surface); max-width: 11em; overflow: hidden; text-overflow: ellipsis; }
+.scorecard tr.holes .name { background: var(--fairway); }
+.scorecard tr.par .name { background: var(--par-bg); }
+.scorecard .pos { display: inline-block; min-width: 1.8em; color: var(--muted); font-size: 0.85em; }
+.scorecard td.sum { background: var(--sum-bg); font-weight: 600; min-width: 2.8em; }
+.scorecard tr.holes th.sum { background: var(--fairway-dark); }
+.scorecard td.total { font-weight: 700; }
+.scorecard td.future { background: repeating-linear-gradient(135deg, transparent 0 5px, var(--par-bg) 5px 7px); }
+.scorecard tbody tr:hover td:not(.sum):not(.future) { background: var(--par-bg); }
+.mark { display: inline-grid; place-items: center; width: 1.75em; height: 1.75em; line-height: 1; box-sizing: border-box; }
+.mark.ace { border-radius: 50%; background: var(--gold); color: var(--gold-text); font-weight: 700; box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--gold); }
+.mark.eagle { border-radius: 50%; border: 4px double var(--under); color: var(--under); font-weight: 600; }
+.mark.birdie { border-radius: 50%; border: 1.5px solid var(--under); color: var(--under); font-weight: 600; }
+.mark.bogey { border: 1.5px solid var(--over); color: var(--over); }
+.mark.double { border: 4px double var(--over); color: var(--over); }
+.mark.failed { border-radius: 4px; background: var(--fail-bg); color: var(--bad); font-weight: 700; }
+.mark.missed { color: var(--muted); }
+ul.legend { list-style: none; display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 0; margin: 4px 0 8px; font-size: 0.9em; }
+ul.legend li { display: flex; align-items: center; gap: 6px; }

@@ -1,51 +1,63 @@
 {% extends "base.html" %}
+{% macro to_par_cell(value) -%}
+<span class="topar {{ 'under' if value < 0 else 'over' if value > 0 else 'even' }}">{{ to_par(value) }}</span>
+{%- endmacro %}
 {% block content %}
-<h1>Golf</h1>
+<h1>⛳ Golf</h1>
 {% if not rounds %}
 <p class="muted">{% if anchor is none %}Golf starts with the first starter the bot posts.{% else %}Round 1 tees off with Wordle {{ "{:,}".format(anchor) }}; standings appear the day after.{% endif %}</p>
 {% endif %}
 {% for m, ranked in rounds %}
-<section class="card">
-<h2>Round {{ m.round_no }}, {{ stage(m) }}{% if loop.first and not m.final %} <small class="muted">(current)</small>{% endif %}</h2>
-<p class="muted">Wordle {{ "{:,}".format(m.first) }}{% if m.holes > 1 %}–{{ "{:,}".format(m.last) }}{% endif %} · par {{ par * m.holes }}{% if loop.first %} · through yesterday's puzzle{% endif %}</p>
+<section class="card golf-round">
+<h2>Round {{ m.round_no }} <span class="stage{% if m.final %} final{% endif %}">{{ stage(m) }}</span>{% if loop.first and not m.final %} <span class="stage current">current</span>{% endif %}</h2>
+<p class="muted">Wordle {{ "{:,}".format(m.first) }}–{{ "{:,}".format(m.first + holes - 1) }} · par {{ par * holes }}{% if loop.first and not m.final %} · {{ m.holes }} of {{ holes }} holes played, through yesterday's puzzle{% endif %}</p>
 {% if ranked %}
 <div class="table-wrap">
-<table>
+<table class="golf-board">
   <thead><tr><th>Pos</th><th>Player</th><th class="num">Strokes</th><th class="num">To par</th><th class="num">Played</th></tr></thead>
   <tbody>
   {% for rank, p in ranked %}
-  <tr>
-    <td>{{ position(rank, ranked) }}{% if m.final and rank == 1 %} 🏆{% endif %}</td>
+  <tr{% if rank == 1 %} class="leader"{% endif %}>
+    <td>{{ position(rank, ranked) }}{% if rank == 1 %} {{ "🏆" if m.final else "⛳" }}{% endif %}</td>
     <td><a href="/scores?user={{ p.user_id }}">{{ p.name }}</a></td>
     <td class="num">{{ p.total }}</td>
-    <td class="num">{{ to_par(p.to_par) }}</td>
+    <td class="num">{{ to_par_cell(p.to_par) }}</td>
     <td class="num">{{ p.played }}/{{ m.holes }}</td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
 </div>
-<details>
+<details{% if loop.first %} open{% endif %}>
 <summary>Scorecard</summary>
-{% set nines = [(0, "Out")] + ([(9, "In")] if m.holes > 9 else []) %}
-<div class="table-wrap">
+<div class="scorecard-wrap">
 <table class="scorecard">
   <thead>
-  <tr><th>Hole</th>
-    {% for start, label in nines %}{% for h in range(start, [start + 9, m.holes] | min) %}<th class="num">{{ h + 1 }}</th>{% endfor %}<th class="num">{{ label }}</th>{% endfor %}
-    {% if m.holes > 9 %}<th class="num">Tot</th>{% endif %}
+  <tr class="holes">
+    <th class="name" scope="col">Hole</th>
+    {% for h in range(holes) %}
+    <th scope="col">{% if h < m.holes %}<a href="/scores?puzzle={{ m.first + h }}" title="Wordle {{ '{:,}'.format(m.first + h) }}">{{ h + 1 }}</a>{% else %}{{ h + 1 }}{% endif %}</th>
+    {% if h + 1 == nine %}<th class="sum" scope="col">Out</th>{% endif %}
+    {% endfor %}
+    <th class="sum" scope="col">In</th><th class="sum" scope="col">Tot</th><th class="sum" scope="col">±</th>
   </tr>
-  <tr class="par"><th>Par</th>
-    {% for start, label in nines %}{% set n = ([start + 9, m.holes] | min) - start %}{% for _ in range(n) %}<td class="num">{{ par }}</td>{% endfor %}<td class="num">{{ par * n }}</td>{% endfor %}
-    {% if m.holes > 9 %}<td class="num">{{ par * m.holes }}</td>{% endif %}
+  <tr class="par">
+    <th class="name" scope="row">Par</th>
+    {% for h in range(holes) %}<td>{{ par }}</td>{% if h + 1 == nine %}<td class="sum">{{ par * nine }}</td>{% endif %}{% endfor %}
+    <td class="sum">{{ par * nine }}</td><td class="sum">{{ par * holes }}</td><td class="sum"></td>
   </tr>
   </thead>
   <tbody>
   {% for rank, p in ranked %}
   <tr>
-    <th><a href="/scores?user={{ p.user_id }}">{{ p.name }}</a></th>
-    {% for start, label in nines %}{% set end = [start + 9, m.holes] | min %}{% for h in range(start, end) %}<td class="num{% if p.cells[h] in (failed, missed) %} bad{% endif %}">{{ p.cells[h] }}</td>{% endfor %}<td class="num">{{ p.strokes[start:end] | sum }}</td>{% endfor %}
-    {% if m.holes > 9 %}<td class="num">{{ p.total }}</td>{% endif %}
+    <th class="name" scope="row"><span class="pos">{{ position(rank, ranked) }}</span> {{ p.name }}</th>
+    {% for h in range(holes) %}
+    {% if h < m.holes %}<td><span class="mark {{ mark(p.cells[h]) }}" title="{{ mark(p.cells[h]) }}">{{ p.cells[h] }}</span></td>{% else %}<td class="future"></td>{% endif %}
+    {% if h + 1 == nine %}<td class="sum">{{ p.strokes[:nine] | sum }}</td>{% endif %}
+    {% endfor %}
+    <td class="sum">{% if m.holes > nine %}{{ p.strokes[nine:] | sum }}{% endif %}</td>
+    <td class="sum total">{{ p.total }}</td>
+    <td class="sum">{{ to_par_cell(p.to_par) }}</td>
   </tr>
   {% endfor %}
   </tbody>
@@ -57,5 +69,17 @@
 {% endif %}
 </section>
 {% endfor %}
-{% if rounds %}<p class="muted">On the scorecards, {{ failed }} = failed and {{ missed }} = not played; both score {{ fail_score }} strokes.</p>{% endif %}
+{% if rounds %}
+<ul class="legend" aria-label="Scorecard key">
+  <li><span class="mark ace">1</span> Hole in one</li>
+  <li><span class="mark eagle">2</span> Eagle</li>
+  <li><span class="mark birdie">3</span> Birdie</li>
+  <li><span class="mark par">4</span> Par</li>
+  <li><span class="mark bogey">5</span> Bogey</li>
+  <li><span class="mark double">6</span> Double bogey or worse</li>
+  <li><span class="mark failed">X</span> Failed</li>
+  <li><span class="mark missed">-</span> Not played</li>
+</ul>
+<p class="muted">A failed or unplayed hole scores {{ fail_score }}. Totals count holes played so far.</p>
+{% endif %}
 {% endblock %}

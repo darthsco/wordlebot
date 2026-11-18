@@ -154,6 +154,23 @@ def _block(lines: list[str]) -> str:
     return "```\n" + "\n".join(lines) + "\n```"
 
 
+def hole_mark(cell: str) -> str:
+    """A card cell's score name, as scorecards mark it: "ace" (a hole in one),
+    "eagle" or better, "birdie", "par", "bogey", "double" (bogey or worse),
+    "failed" or "missed"."""
+    if cell == FAILED:
+        return "failed"
+    if cell == MISSED:
+        return "missed"
+    guesses = int(cell)
+    if guesses == 1:
+        return "ace"
+    diff = guesses - PAR
+    if diff <= -2:
+        return "eagle"
+    return {-1: "birdie", 0: "par", 1: "bogey"}.get(diff, "double")
+
+
 def position(rank: int, ranked: list[tuple[int, Player]]) -> str:
     """A rank as shown: "T2" when shared."""
     tied = sum(r == rank for r, _ in ranked) > 1

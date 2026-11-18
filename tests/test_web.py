@@ -458,15 +458,17 @@ def test_golf_tab_shows_the_current_round_then_earlier_ones(tmp_path):
         _, text = await browser.get("/golf")
         nav = text[text.index("<nav>"):text.index("</nav>")]
         assert nav.index('"/scores"') < nav.index('"/golf"') < nav.index('"/config"')
-        assert text.index("Round 2, through 5 holes") < text.index("Round 1, final")
+        assert text.index("Round 2 <span") < text.index("Round 1 <span")
         assert "&lt;Ada&gt;" in text and "<Ada>" not in text
-        current, earlier = text.split("Round 1, final")
-        assert current.count("<summary>Scorecard</summary>") == 1
-        assert '<th class="num">5</th><th class="num">Out</th>' in current
-        assert "In</th>" not in current  # the back nine hasn't started
-        assert '<th class="num">18</th><th class="num">In</th>' in earlier
-        assert '<td class="num">2</td><td class="num bad">-</td>' in current  # Bob, holes 1-2
-        assert '<td class="num">30</td>' in current  # 2 + 4 missed at 7
+        current, earlier = text.split("Round 1 <span")
+        # Every card has all 18 holes; the current one shades the holes still to come.
+        assert current.count('<th scope="col">') == earlier.count('<th scope="col">') == 18
+        assert current.count('<td class="future">') == 13 and "future" not in earlier
+        assert '<details open>' in current and '<details open>' not in earlier
+        assert '<span class="mark eagle" title="eagle">2</span>' in current  # Bob's hole 1
+        assert current.count('<span class="mark missed"') == 4
+        assert '<td class="sum">30</td>' in current  # Out: 2 + 4 missed at 7
+        assert '<span class="mark birdie" title="birdie">3</span>' in earlier  # Ada's hole 1
 
 
         env.service.config = replace(env.service.config, golf=GolfConfig(enabled=False))

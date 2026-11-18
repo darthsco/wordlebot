@@ -508,8 +508,9 @@ class Panel:
             position=golf.position,
             to_par=golf.format_to_par,
             fail_score=self.service.config.game.fail_score,
-            failed=golf.FAILED,
-            missed=golf.MISSED,
+            mark=golf.hole_mark,
+            holes=golf.HOLES,
+            nine=golf.NINE,
         )
 
     # --- config ----------------------------------------------------------------
