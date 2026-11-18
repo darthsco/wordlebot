@@ -25,6 +25,7 @@ import jinja2
 from aiohttp import web
 
 from ..auth import STAGE_ENROLL, STAGE_FULL, STAGE_TOTP, Auth, CurrentSession
+from .. import golf
 from ..db import Starter
 from ..game import puzzle_number
 from ..service import (
@@ -137,6 +138,7 @@ class Panel:
         r.add_get("/scores/deleted", self.deleted_scores)
         r.add_get("/scores/add", self.add_score_page)
         r.add_post("/scores/edit", self.edit_score)
+        r.add_get("/golf", self.golf_page)
         r.add_get("/config", self.config_page)
         r.add_post("/config", self.config_change)
         r.add_get("/audit", self.audit)
@@ -259,6 +261,7 @@ class Panel:
             csrf=current.csrf_token if current else "",
             flash=flash,
             path=request.path,
+            golf_enabled=self.service.config.golf.enabled,
             static=lambda name: str(request.app.router["static"].url_for(filename=name)),
             **context,
         )
@@ -489,6 +492,25 @@ class Panel:
         if fields["puzzle"]:
             return f"/scores?{urlencode({'puzzle': fields['puzzle']})}"
         return "/scores"
+
+    # --- golf -------------------------------------------------------------------
+
+    async def golf_page(self, request: web.Request) -> web.StreamResponse:
+        if not self.service.config.golf.enabled:
+            raise web.HTTPNotFound()
+        return self.render(
+            request,
+            "golf.html",
+            rounds=self.service.golf_rounds(),
+            anchor=self.service.golf_anchor(),
+            par=golf.PAR,
+            stage=golf.stage,
+            position=golf.position,
+            to_par=golf.format_to_par,
+            fail_score=self.service.config.game.fail_score,
+            failed=golf.FAILED,
+            missed=golf.MISSED,
+        )
 
     # --- config ----------------------------------------------------------------
 

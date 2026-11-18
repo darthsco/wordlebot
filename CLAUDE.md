@@ -77,6 +77,7 @@ Competition ranking (1, 2, 2, 4), decided on lower average, then more games; a t
 - No backfill: golf shipped while the only install had played 3 holes, so existing history is the start of round 1.
 - `golf.format_round` keeps every message under `MESSAGE_LIMIT` (a long board or card continues in a new message with its header rows repeated), so `bot.chunks` never splits a code block. `card_max_players` caps the cards (0 = everyone); the board always lists everyone.
 - `golf_post_messages` stores each post's (message id, text). After a panel score edit, `apply_edit` calls `_golf_score_edited`, which regenerates every post covering that puzzle and, if it differs: `on_score_edit = "edit"` rewrites the messages (`bot._edit` via `panel_edit`), and `"correct"` posts a `GOLF_CORRECTED_PREFIX` copy. `"edit"` falls back to a correction when the message count changed. A changed `card_max_players` also counts as a difference.
+- The panel's Golf tab (`/golf`, 404 and hidden from the nav while `[golf] enabled` is off) renders `golf_rounds`: the current round as `/golf` sees it, then every earlier round complete, newest first.
 - Card names go through `golf._card_name` (no backticks, truncated); names outside the code block go through `escape_name`.
 
 ## Admin panel

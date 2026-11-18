@@ -154,7 +154,8 @@ def _block(lines: list[str]) -> str:
     return "```\n" + "\n".join(lines) + "\n```"
 
 
-def _position(rank: int, ranked: list[tuple[int, Player]]) -> str:
+def position(rank: int, ranked: list[tuple[int, Player]]) -> str:
+    """A rank as shown: "T2" when shared."""
     tied = sum(r == rank for r, _ in ranked) > 1
     return f"T{rank}" if tied else str(rank)
 
@@ -174,6 +175,15 @@ def _blocks(head: list[str], rows: list[str], first_prefix: str = "") -> list[st
     return messages
 
 
+def stage(milestone: Milestone) -> str:
+    """How far the round has got: "final", "after the front nine" or "through N holes"."""
+    if milestone.final:
+        return "final"
+    if milestone.holes == NINE:
+        return "after the front nine"
+    return f"through {milestone.holes} hole{'s' if milestone.holes != 1 else ''}"
+
+
 def format_round(
     milestone: Milestone, ranked: list[tuple[int, Player]], max_players: int = 0
 ) -> list[str]:
@@ -186,14 +196,8 @@ def format_round(
     """
     m = milestone
     par = PAR * m.holes
-    if m.final:
-        stage = "final"
-    elif m.holes == NINE:
-        stage = "after the front nine"
-    else:
-        stage = f"through {m.holes} hole{'s' if m.holes != 1 else ''}"
     span = f"Wordle {m.first:,}" if m.holes == 1 else f"Wordle {m.first:,}–{m.last:,}"
-    header = f"⛳ **Golf round {m.round_no}, {stage}** ({span}, par {par})"
+    header = f"⛳ **Golf round {m.round_no}, {stage(m)}** ({span}, par {par})"
     if not ranked:
         return [f"{header}\nNo scores this round."]
 
@@ -207,7 +211,7 @@ def format_round(
 
     width = max(len(_card_name(p.name)) for _, p in ranked)
     board = [
-        f"{_position(rank, ranked):<4}{_card_name(p.name):<{width}}  "
+        f"{position(rank, ranked):<4}{_card_name(p.name):<{width}}  "
         f"{p.total:>3}  {format_to_par(p.to_par):>3}  {f'{p.played}/{m.holes}':>5}"
         for rank, p in ranked
     ]

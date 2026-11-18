@@ -72,3 +72,9 @@ tr.bad-row td { color: var(--bad); }
 .secret { overflow-wrap: anywhere; }
 ul.plain { list-style: none; padding: 0; margin: 0 0 8px; }
 code { font-family: ui-monospace, monospace; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+section.card details { margin: 12px 0 0; }
+summary { cursor: pointer; color: var(--accent); }
+table.scorecard th, table.scorecard td { padding: 4px 7px; }
+table.scorecard tbody th { font-weight: 500; white-space: nowrap; }
+table.scorecard tr.par td { color: var(--muted); }

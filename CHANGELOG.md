@@ -6,6 +6,10 @@ What counts as a breaking change: anything that makes an operator or player chan
 
 ## [Unreleased]
 
+### Added
+
+- Admin panel: a Golf tab (shown when `[golf] enabled`, next to Scores) with the full leaderboard of the current round, through yesterday's puzzle, then every earlier round, newest first. Each round has a hole-by-hole scorecard to expand.
+
 ## [0.3.0] - 2026-11-17
 
 ### Added

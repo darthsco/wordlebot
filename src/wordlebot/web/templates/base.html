@@ -13,7 +13,8 @@
   <strong class="brand">wordlebot admin</strong>
   {% if user %}
   <nav>
-    {% for href, label in [("/", "Dashboard"), ("/scores", "Scores"), ("/config", "Config"), ("/audit", "Audit log"), ("/account", "Account")] %}
+    {% set golf_tab = [("/golf", "Golf")] if golf_enabled else [] %}
+    {% for href, label in [("/", "Dashboard"), ("/scores", "Scores")] + golf_tab + [("/config", "Config"), ("/audit", "Audit log"), ("/account", "Account")] %}
     <a href="{{ href }}"{% if path == href or (href != "/" and path.startswith(href)) %} aria-current="page"{% endif %}>{{ label }}</a>
     {% endfor %}
   </nav>

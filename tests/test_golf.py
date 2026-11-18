@@ -274,6 +274,18 @@ def test_golf_command_shows_the_round_through_yesterday(tmp_path):
     assert "Golf round 1, final" in text
 
 
+def test_golf_rounds_lists_the_current_round_then_earlier_ones_newest_first(tmp_path):
+    service, _, _ = make(tmp_path)
+    assert service.golf_rounds(TODAY) == []  # hole 1 isn't over yet
+    service.db.add_score(score(ANCHOR, 1, 3))
+    service.db.add_score(score(ANCHOR + 18, 2, 2))
+    service.db.add_score(score(ANCHOR + 37, 3, 2))  # round 3, after yesterday
+    rounds = service.golf_rounds(ROUND_DONE + timedelta(days=5))
+    assert [m for m, _ in rounds] == [Milestone(2, ANCHOR + 18, 5), FINAL]
+    assert [p.user_id for _, p in rounds[0][1]] == [2]
+    assert [p.user_id for _, p in rounds[1][1]] == [1]
+
+
 # --- score edits after a post -----------------------------------------------------
 
 ADMIN = Actor("admin", "127.0.0.1")

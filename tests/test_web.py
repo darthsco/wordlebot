@@ -1,16 +1,19 @@
 import asyncio
 import re
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pyotp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+
 from test_bot import Share, make_bot
+from test_golf import ROUND_DONE, score
 from test_service import GOOD_SHARE, SOLUTION, TODAY
 from test_solutions import FakeSource
 
 from wordlebot.auth import Auth, hash_password
-from wordlebot.config import WebConfig
+from wordlebot.config import GolfConfig, WebConfig
 from wordlebot.service import REROLL_PREFIX
 from wordlebot.web import SESSION_COOKIE, Panel
 
@@ -442,6 +445,35 @@ def test_dashboard_hides_answers_until_they_may_be_shown(tmp_path):
         env.clock.set(TODAY + timedelta(days=2), 10)
         _, text = await browser.get("/scores?puzzle=12")
         assert f'class="spoiler" tabindex="0">{SOLUTION.upper()}' in text
+
+    run(tmp_path, scenario, hour=10)
+
+
+def test_golf_tab_shows_the_current_round_then_earlier_ones(tmp_path):
+    async def scenario(env, browser):
+        env.db.add_score(score(12, 1, 3, name="<Ada>"))
+        env.db.add_score(score(30, 2, 2, name="Bob"))
+        env.clock.set(ROUND_DONE + timedelta(days=5), 10)
+        await env.login(browser)
+        _, text = await browser.get("/golf")
+        nav = text[text.index("<nav>"):text.index("</nav>")]
+        assert nav.index('"/scores"') < nav.index('"/golf"') < nav.index('"/config"')
+        assert text.index("Round 2, through 5 holes") < text.index("Round 1, final")
+        assert "&lt;Ada&gt;" in text and "<Ada>" not in text
+        current, earlier = text.split("Round 1, final")
+        assert current.count("<summary>Scorecard</summary>") == 1
+        assert '<th class="num">5</th><th class="num">Out</th>' in current
+        assert "In</th>" not in current  # the back nine hasn't started
+        assert '<th class="num">18</th><th class="num">In</th>' in earlier
+        assert '<td class="num">2</td><td class="num bad">-</td>' in current  # Bob, holes 1-2
+        assert '<td class="num">30</td>' in current  # 2 + 4 missed at 7
+
+
+        env.service.config = replace(env.service.config, golf=GolfConfig(enabled=False))
+        _, text = await browser.get("/")
+        assert '"/golf"' not in text
+        response, _ = await browser.get("/golf")
+        assert response.status == 404
 
     run(tmp_path, scenario, hour=10)
 

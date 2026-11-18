@@ -542,6 +542,27 @@ class WordleService:
             except Exception:
                 log.exception("Could not update the golf post for round %d", milestone.round_no)
 
+    def golf_rounds(
+        self, today: date | None = None
+    ) -> list[tuple[golf.Milestone, list[tuple[int, golf.Player]]]]:
+        """Every round so far with its full leaderboard, newest first: the current
+        one through yesterday's puzzle (as `/golf` shows it), then each earlier
+        round, complete. Empty until the first hole is over."""
+        today = today or self.today()
+        anchor = self.golf_anchor()
+        if anchor is None:
+            return []
+        current = golf.progress(anchor, puzzle_number(today - timedelta(days=1), self.launch))
+        if current is None:
+            return []
+        scores = self._counted(anchor, current.last)
+        fail_score = self.config.game.fail_score
+        rounds = [current] + [
+            golf.Milestone(n, anchor + (n - 1) * golf.HOLES, golf.HOLES)
+            for n in range(current.round_no - 1, 0, -1)
+        ]
+        return [(m, golf.card(scores, m, fail_score)) for m in rounds]
+
     def golf_standings(self, today: date | None = None) -> str:
         """`/golf`: the current round through the last puzzle that is over everywhere
         (yesterday's), or the round that just ended."""
