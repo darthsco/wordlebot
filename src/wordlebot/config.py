@@ -15,6 +15,8 @@ from zoneinfo import ZoneInfo
 ALL_TIME = -1
 
 STRATEGIES = ("random_answer_like", "random_all_valid", "weighted_quality", "varied")
+GOLF_MISSED_POSTS = ("latest", "all")
+GOLF_ON_SCORE_EDIT = ("none", "edit", "correct")
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,9 @@ class WebConfig:
 class GolfConfig:
     enabled: bool = True
     post_time: str = "08:00"
+    missed_posts: str = "latest"
+    card_max_players: int = 10
+    on_score_edit: str = "none"
 
     def post_time_local(self, tz: ZoneInfo) -> time:
         hour, minute = (int(p) for p in self.post_time.split(":"))
@@ -251,6 +256,9 @@ _RULES: dict[str, dict[str, Rule]] = {
     },
     "golf": {
         "post_time": (_is_post_time, "must be HH:MM in 24-hour time, e.g. \"08:00\""),
+        "missed_posts": (lambda v: v in GOLF_MISSED_POSTS, f"must be one of {', '.join(GOLF_MISSED_POSTS)}"),
+        "card_max_players": _at_least(0),
+        "on_score_edit": (lambda v: v in GOLF_ON_SCORE_EDIT, f"must be one of {', '.join(GOLF_ON_SCORE_EDIT)}"),
     },
     "storage": {
         "database_path": _NON_EMPTY,

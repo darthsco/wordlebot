@@ -31,6 +31,8 @@ log = logging.getLogger(__name__)
 
 # Sends text to the channel and returns the id of the message it created.
 Send = Callable[[str], Awaitable[int]]
+# Replaces the text of one of the bot's messages in the channel.
+EditMessage = Callable[[int, str], Awaitable[None]]
 
 # Kinds of owed post, see `WordleService.due_posts`.
 LATE = "late"  # the post for a date already in play was missed
@@ -40,6 +42,7 @@ UNANNOUNCED = "unannounced"  # picked outside the daily post, but the send faile
 LATE_PREFIX = "⚠️ **LATE** "
 REMINDER_PREFIX = "⏰ **REMINDER** "
 REROLL_PREFIX = "🔁 **Rerolled!** "
+GOLF_CORRECTED_PREFIX = "📝 **Corrected** "
 
 # How long `refresh_if_missing` waits before asking the source again for a
 # solution it failed to get, so a failing endpoint isn't hit on every tick.
@@ -417,7 +420,7 @@ class WordleService:
         now = self.now()  # read once, so a run near midnight can't change dates halfway
         due = self.due_posts(now)
         golf_due = self.due_golf(now)
-        if not due and golf_due is None:
+        if not due and not golf_due:
             return []
         today = now.date()
         try:
@@ -425,10 +428,11 @@ class WordleService:
         except Exception:
             log.exception("Solution refresh failed; continuing with cached data")
         try:
-            if golf_due is not None:
+            if golf_due:
                 # Settle the last hole's shares first, so the card counts them.
                 self.reverify_pending(today)
-                await self._post_golf(golf_due, send)
+            for milestone in golf_due:
+                await self._post_golf(milestone, send)
             for post in due:
                 await self._post(post, today, send)
         finally:
@@ -467,40 +471,76 @@ class WordleService:
     #
     # Each puzzle is a hole, counted in rounds of 18 from the first starter's puzzle.
     # The morning after a round's front nine, and after its 18th hole, the
-    # reconciler posts the round's card. Only the latest milestone is ever owed: if
-    # the bot misses one entirely, the next supersedes it rather than both posting.
+    # reconciler posts the round's card. With `missed_posts = "latest"` only the
+    # latest milestone is ever owed: one the bot missed entirely is superseded by
+    # the next. With "all", every one after the last posted is owed, oldest first.
 
     def golf_anchor(self) -> int | None:
         """Hole 1 of round 1; None until the bot has picked a starter."""
         return self.db.first_starter_puzzle()
 
-    def due_golf(self, now: datetime | None = None) -> golf.Milestone | None:
-        """The golf milestone owed at `now`, if any."""
+    def _golf_post_at(self, milestone: golf.Milestone) -> datetime:
+        post_day = puzzle_date(milestone.last, self.launch) + timedelta(days=1)
+        return datetime.combine(post_day, self.config.golf.post_time_local(self.config.schedule.tz))
+
+    def due_golf(self, now: datetime | None = None) -> list[golf.Milestone]:
+        """The golf milestones owed at `now`, oldest first."""
         now = now or self.now()
         anchor = self.golf_anchor()
         if not self.config.golf.enabled or anchor is None:
-            return None
+            return []
         yesterday = puzzle_number(now.date() - timedelta(days=1), self.launch)
-        milestone = golf.latest_milestone(anchor, yesterday)
-        if milestone is None or self.db.golf_posted(milestone.first, milestone.holes):
-            return None
-        post_day = puzzle_date(milestone.last, self.launch) + timedelta(days=1)
-        post_at = datetime.combine(
-            post_day, self.config.golf.post_time_local(self.config.schedule.tz)
-        )
-        return milestone if now >= post_at else None
+        done = [m for m in golf.milestones(anchor, yesterday) if now >= self._golf_post_at(m)]
+        if self.config.golf.missed_posts == "latest":
+            done = done[-1:]
+        if latest := self.db.latest_golf_post():
+            first, holes = latest
+            done = [m for m in done if m.last > first + holes - 1]  # never go back
+        return done
 
     def golf_report(self, milestone: golf.Milestone) -> list[str]:
         """The round's leaderboard and cards as of `milestone`, one message each."""
         scores = self._counted(milestone.first, milestone.last)
         ranked = golf.card(scores, milestone, self.config.game.fail_score)
-        return golf.format_round(milestone, ranked)
+        return golf.format_round(milestone, ranked, self.config.golf.card_max_players)
 
-    async def _post_golf(self, milestone: golf.Milestone, send: Send) -> None:
-        for message in self.golf_report(milestone):
-            await send(message)
-        self.db.mark_golf_posted(milestone.first, milestone.holes)
+    async def _post_golf(self, milestone: golf.Milestone, send: Send, prefix: str = "") -> None:
+        report = self.golf_report(milestone)
+        sent = []
+        for i, message in enumerate(report):
+            sent.append((await send((prefix if i == 0 else "") + message), message))
+        self.db.mark_golf_posted(milestone.first, milestone.holes, sent)
         log.info("Posted golf round %d after %d holes", milestone.round_no, milestone.holes)
+
+    async def _golf_score_edited(
+        self, number: int, send: Send | None, edit_message: EditMessage | None
+    ) -> None:
+        """Bring the golf posts that included puzzle `number` up to date, as
+        `on_score_edit` says. A failure is logged: the score edit itself is done."""
+        mode = self.config.golf.on_score_edit
+        anchor = self.golf_anchor()
+        if mode == "none" or send is None or anchor is None:
+            return
+        for first, holes in self.db.golf_posts_covering(number):
+            milestone = golf.Milestone(golf.round_no(first, anchor), first, holes)
+            posted = self.db.golf_post_messages(first, holes)
+            report = self.golf_report(milestone)
+            if report == [text for _, text in posted]:
+                continue  # the edit didn't change this post
+            try:
+                if mode == "edit" and edit_message is not None and len(report) == len(posted):
+                    for (message_id, old), new in zip(posted, report):
+                        if old != new:
+                            await edit_message(message_id, new)
+                    self.db.mark_golf_posted(
+                        first, holes, [(mid, new) for (mid, _), new in zip(posted, report)]
+                    )
+                else:
+                    # A correction; also "edit" when the post now needs a different
+                    # number of messages than it was sent as.
+                    await self._post_golf(milestone, send, GOLF_CORRECTED_PREFIX)
+            except Exception:
+                log.exception("Could not update the golf post for round %d", milestone.round_no)
 
     def golf_standings(self, today: date | None = None) -> str:
         """`/golf`: the current round through the last puzzle that is over everywhere
@@ -819,9 +859,17 @@ class WordleService:
             self._all_time_standing(after, target.user_id),
         )
 
-    async def apply_edit(self, edit: ScoreEdit, actor: Actor, reason: str, send: Send | None = None) -> None:
-        """Make a planned edit, audit it, queue its reaction change, and announce it if
-        configured. Raises AdminError if the score changed since it was planned."""
+    async def apply_edit(
+        self,
+        edit: ScoreEdit,
+        actor: Actor,
+        reason: str,
+        send: Send | None = None,
+        edit_message: EditMessage | None = None,
+    ) -> None:
+        """Make a planned edit, audit it, queue its reaction change, announce it if
+        configured, and update golf posts it changed (`on_score_edit`). Raises
+        AdminError if the score changed since it was planned."""
         reason = " ".join(reason.split())
         if not reason:
             raise AdminError("A reason is required.")
@@ -856,6 +904,7 @@ class WordleService:
         log.info("Admin %s: %s (%s)", actor.name, detail, reason)
         if send is not None and getattr(self.config.announce, f"score_{edit.action}"):
             await self._announce(send, actor, _announcement(edit))
+        await self._golf_score_edited(score.puzzle_number, send, edit_message)
 
     async def _announce(self, send: Send, actor: Actor, text: str) -> None:
         """Post an admin-action note; a failure is logged, as the action itself is done."""

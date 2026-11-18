@@ -49,6 +49,15 @@ min_games_all_time = 5
 # leaderboard and hole-by-hole card (/golf shows it any time).
 enabled = true
 post_time = "08:00"       # HH:MM (24-hour), local to [schedule] timezone
+# If the bot misses a post until the next one is due: "latest" posts only the newer
+# one; "all" posts every missed one (since the last posted), oldest first.
+missed_posts = "latest"
+# Players on the hole-by-hole cards (the leaderboard always lists everyone).
+# 0 shows everyone, continuing a long card in further messages.
+card_max_players = 10
+# When an admin edits a score in a round already posted: "none" leaves the post;
+# "edit" rewrites the posted messages; "correct" posts an updated, marked copy.
+on_score_edit = "none"
 
 [storage]
 database_path = "wordlebot.sqlite3"

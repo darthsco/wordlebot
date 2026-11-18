@@ -121,6 +121,11 @@ class WordleBot(discord.Client):
             message = await channel.send(part)
         return message.id
 
+    async def _edit(self, message_id: int, text: str) -> None:
+        """Replace the text of one of the bot's messages in the channel."""
+        channel = await self.channel()
+        await channel.get_partial_message(message_id).edit(content=text)  # type: ignore[attr-defined]
+
     # --- posting loop ----------------------------------------------------
 
     async def _reconcile(self) -> None:
@@ -176,6 +181,9 @@ class WordleBot(discord.Client):
 
     async def panel_send(self, text: str) -> int:
         return await self._send(text)
+
+    async def panel_edit(self, message_id: int, text: str) -> None:
+        await self._edit(message_id, text)
 
     async def panel_reroll(self, actor: Actor) -> Starter:
         async with self._post_lock:

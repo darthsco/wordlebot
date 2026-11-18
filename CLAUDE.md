@@ -73,9 +73,10 @@ Competition ranking (1, 2, 2, 4), decided on lower average, then more games; a t
 
 `golf.py` (pure) plus `WordleService.due_golf`/`_post_golf`/`golf_standings`. Each puzzle is a par-4 hole. Rounds of 18 run back to back from `db.first_starter_puzzle()` (the anchor). A hole's strokes are its guesses; X and a missing (or non-counting) score are both `fail_score`. The players on a card are everyone with a counted score in the round so far, ranked by total (ties share a rank; tied leaders of a final are co-champions).
 
-- Milestones are each front nine and each full round. `post_due` sends the **latest** milestone once it is past `[golf] post_time` on the day after its last hole. `golf_posts` records it as sent. An older unposted milestone is superseded, never posted.
-- `Database.__init__` backfills `golf_posts` on an existing database (`_backfill_golf_posts`), so an upgrade never posts a stale round. Golf imports `leaderboard`, which imports `db`, so `db` imports golf inside that function.
-- Each card is its own `send`, so a code block is never split by `bot.chunks`. `/golf` joins them into one DM, which can split for a very large group.
+- Milestones are each front nine and each full round, due once past `[golf] post_time` on the day after their last hole. `golf_posts` records each one sent. `missed_posts = "latest"` (default) owes only the newest, so a missed one is superseded. `"all"` owes every one, oldest first. Neither goes back before the latest posted.
+- No backfill: golf shipped while the only install had played 3 holes, so existing history is the start of round 1.
+- `golf.format_round` keeps every message under `MESSAGE_LIMIT` (a long board or card continues in a new message with its header rows repeated), so `bot.chunks` never splits a code block. `card_max_players` caps the cards (0 = everyone); the board always lists everyone.
+- `golf_post_messages` stores each post's (message id, text). After a panel score edit, `apply_edit` calls `_golf_score_edited`, which regenerates every post covering that puzzle and, if it differs: `on_score_edit = "edit"` rewrites the messages (`bot._edit` via `panel_edit`), and `"correct"` posts a `GOLF_CORRECTED_PREFIX` copy. `"edit"` falls back to a correction when the message count changed. A changed `card_max_players` also counts as a difference.
 - Card names go through `golf._card_name` (no backticks, truncated); names outside the code block go through `escape_name`.
 
 ## Admin panel

@@ -8,7 +8,7 @@ What counts as a breaking change: anything that makes an operator or player chan
 
 ### Added
 
-- Golf: each puzzle is a par-4 hole and 18 in a row are a par-72 round, counted from the bot's first starter. The morning after each front nine and each full round (`[golf] post_time`, default 08:00), the bot posts the round's leaderboard and hole-by-hole card, and the final names the winner. A missed or failed hole scores `fail_score`. `/golf` shows the round in progress. Turn it off with `[golf] enabled = false`. Upgrading doesn't post a round that finished before the upgrade.
+- Golf: each puzzle is a par-4 hole and 18 in a row are a par-72 round, counted from the bot's first starter. The morning after each front nine and each full round (`[golf] post_time`, default 08:00), the bot posts the round's leaderboard and hole-by-hole card, and the final names the winner. A missed or failed hole scores `fail_score`. `/golf` shows the round in progress. Settings: `enabled`, `post_time`, `missed_posts` (`latest` or `all`), `card_max_players` (default 10; 0 shows everyone across several messages) and `on_score_edit` (`none`, `edit` the posted messages, or post a `correct`ion after a panel score edit).
 
 ## [0.2.0] - 2026-11-16
 

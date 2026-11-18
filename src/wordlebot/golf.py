@@ -29,6 +29,10 @@ MISSED = "-"
 # Longest name shown on a card, which is monospace and should fit a phone.
 CARD_NAME_WIDTH = 12
 
+# Each message of a golf post stays under this, below Discord's 2,000 characters
+# with room for the note or prefix added to it (see `format_round`).
+MESSAGE_LIMIT = 1900
+
 
 @dataclass(frozen=True)
 class Milestone:
@@ -65,15 +69,22 @@ def progress(anchor: int, last_played: int) -> Milestone | None:
     return Milestone(round_no(last_played, anchor), first, last_played - first + 1)
 
 
+def milestones(anchor: int, last_played: int) -> list[Milestone]:
+    """Every nine finished by puzzle `last_played` (front nines and whole rounds),
+    oldest first."""
+    result = []
+    for nines in range(1, (last_played - anchor + 1) // NINE + 1):
+        last = anchor + nines * NINE - 1
+        first = round_start(last, anchor)
+        result.append(Milestone(round_no(last, anchor), first, last - first + 1))
+    return result
+
+
 def latest_milestone(anchor: int, last_played: int) -> Milestone | None:
-    """The most recent nine to finish by puzzle `last_played` (a front nine or a
-    whole round); None before the first front nine is over."""
-    nines = (last_played - anchor + 1) // NINE
-    if nines < 1:
-        return None
-    last = anchor + nines * NINE - 1
-    first = round_start(last, anchor)
-    return Milestone(round_no(last, anchor), first, last - first + 1)
+    """The most recent nine to finish by puzzle `last_played`; None before the
+    first front nine is over."""
+    done = milestones(anchor, last_played)
+    return done[-1] if done else None
 
 
 @dataclass(frozen=True)
@@ -148,9 +159,31 @@ def _position(rank: int, ranked: list[tuple[int, Player]]) -> str:
     return f"T{rank}" if tied else str(rank)
 
 
-def format_round(milestone: Milestone, ranked: list[tuple[int, Player]]) -> list[str]:
-    """The round's leaderboard and hole-by-hole cards, one message each so no code
-    block is split across messages."""
+def _blocks(head: list[str], rows: list[str], first_prefix: str = "") -> list[str]:
+    """`rows` under `head` in code blocks, as many messages as it takes to keep
+    each under MESSAGE_LIMIT. Each message repeats `head`; the first starts with
+    `first_prefix`."""
+    messages: list[str] = []
+    prefix, chunk = first_prefix, list(head)
+    for row in rows:
+        if len(chunk) > len(head) and len(prefix) + len(_block(chunk + [row])) > MESSAGE_LIMIT:
+            messages.append(prefix + _block(chunk))
+            prefix, chunk = "", list(head)
+        chunk.append(row)
+    messages.append(prefix + _block(chunk))
+    return messages
+
+
+def format_round(
+    milestone: Milestone, ranked: list[tuple[int, Player]], max_players: int = 0
+) -> list[str]:
+    """The round's leaderboard, then a hole-by-hole card per nine.
+
+    Every message is under MESSAGE_LIMIT, so `bot.chunks` never splits a code
+    block: a long board or card continues in another message with its header rows
+    repeated. `max_players` (0 = everyone) caps the players on the cards; everyone
+    is on the leaderboard.
+    """
     m = milestone
     par = PAR * m.holes
     if m.final:
@@ -173,28 +206,37 @@ def format_round(milestone: Milestone, ranked: list[tuple[int, Player]]) -> list
         label = "Leader:" if len(leaders) == 1 else "Leaders:"
 
     width = max(len(_card_name(p.name)) for _, p in ranked)
-    board = [f"{'Pos':<4}{'Name':<{width}}  {'TOT':>3}  {'PAR':>3}  {'PLD':>5}"]
-    for rank, p in ranked:
-        board.append(
-            f"{_position(rank, ranked):<4}{_card_name(p.name):<{width}}  "
-            f"{p.total:>3}  {format_to_par(p.to_par):>3}  {f'{p.played}/{m.holes}':>5}"
-        )
-    messages = [f"{header}\n{label} {names} {result}\n{_block(board)}"]
+    board = [
+        f"{_position(rank, ranked):<4}{_card_name(p.name):<{width}}  "
+        f"{p.total:>3}  {format_to_par(p.to_par):>3}  {f'{p.played}/{m.holes}':>5}"
+        for rank, p in ranked
+    ]
+    messages = _blocks(
+        [f"{'Pos':<4}{'Name':<{width}}  {'TOT':>3}  {'PAR':>3}  {'PLD':>5}"],
+        board,
+        f"{header}\n{label} {names} {result}\n",
+    )
 
+    shown = ranked[:max_players] if max_players > 0 else ranked
     for start in range(0, m.holes, NINE):
         holes = range(start, min(start + NINE, m.holes))
         total_label = "OUT" if start == 0 else "IN"
-        lines = [
+        head = [
             f"{'Hole':<{width}} " + "".join(f"{h + 1:>3}" for h in holes) + f" {total_label:>4}",
             f"{'Par':<{width}} " + "".join(f"{PAR:>3}" for _ in holes) + f" {PAR * len(holes):>4}",
         ]
-        for _, p in ranked:
-            lines.append(
-                f"{_card_name(p.name):<{width}} "
-                + "".join(f"{p.cells[h]:>3}" for h in holes)
-                + f" {sum(p.strokes[h] for h in holes):>4}"
-            )
-        messages.append(_block(lines))
-    if any(MISSED in p.cells for _, p in ranked) or any(FAILED in p.cells for _, p in ranked):
-        messages[-1] += f"\n{FAILED} = failed, {MISSED} = not played; both score as a fail."
+        rows = [
+            f"{_card_name(p.name):<{width}} "
+            + "".join(f"{p.cells[h]:>3}" for h in holes)
+            + f" {sum(p.strokes[h] for h in holes):>4}"
+            for _, p in shown
+        ]
+        messages += _blocks(head, rows)
+    notes = []
+    if len(shown) < len(ranked):
+        notes.append(f"Cards show the top {len(shown)} of {len(ranked)}; everyone is on the leaderboard.")
+    if any(MISSED in p.cells or FAILED in p.cells for _, p in shown):
+        notes.append(f"{FAILED} = failed, {MISSED} = not played; both score as a fail.")
+    if notes:
+        messages[-1] += "\n" + "\n".join(notes)
     return messages

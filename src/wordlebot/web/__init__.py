@@ -85,6 +85,7 @@ class Host(Protocol):
     started_at: datetime
 
     async def panel_send(self, text: str) -> int: ...
+    async def panel_edit(self, message_id: int, text: str) -> None: ...
     async def panel_reroll(self, actor: Actor) -> Starter: ...
     async def panel_tick(self) -> None: ...
     async def panel_settle(self, actor: Actor) -> int: ...
@@ -465,7 +466,9 @@ class Panel:
                 error="A reason is required." if form.get("confirm") == "yes" else None,
             )
         try:
-            await self.service.apply_edit(edit, self._actor(request), reason, self.host.panel_send)
+            await self.service.apply_edit(
+                edit, self._actor(request), reason, self.host.panel_send, self.host.panel_edit
+            )
         except AdminError as exc:
             self._flash_next(request, str(exc))
         else:
