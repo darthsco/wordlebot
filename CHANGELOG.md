@@ -6,6 +6,8 @@ What counts as a breaking change: anything that makes an operator or player chan
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-17
+
 ### Added
 
 - Golf: each puzzle is a par-4 hole and 18 in a row are a par-72 round, counted from the bot's first starter. The morning after each front nine and each full round (`[golf] post_time`, default 08:00), the bot posts the round's leaderboard and hole-by-hole card, and the final names the winner. A missed or failed hole scores `fail_score`. `/golf` shows the round in progress. Settings: `enabled`, `post_time`, `missed_posts` (`latest` or `all`), `card_max_players` (default 10; 0 shows everyone across several messages) and `on_score_edit` (`none`, `edit` the posted messages, or post a `correct`ion after a panel score edit).
@@ -40,5 +42,6 @@ The first tagged release. It covers everything since the project began; `0.1.0` 
 
 See [Upgrading an existing install](README.md#upgrading-an-existing-install). The database migrates itself, and new settings have defaults.
 
-[Unreleased]: https://github.com/darthsco/wordlebot/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/darthsco/wordlebot/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/darthsco/wordlebot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/darthsco/wordlebot/releases/tag/v0.2.0
