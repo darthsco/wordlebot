@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import asdict
 from datetime import datetime, timezone
 
@@ -114,11 +114,20 @@ class WordleBot(discord.Client):
             channel = await self.fetch_channel(channel_id)
         return channel  # type: ignore[return-value]
 
-    async def _send(self, text: str) -> int:
-        """Post `text` to the channel, split to fit; returns the last message's id."""
+    async def _send(self, text: str, *, ping: Collection[int] = ()) -> int:
+        """Post `text` to the channel, split to fit; returns the last message's id.
+
+        Only the users in `ping` are notified by their mentions.
+        """
         channel = await self.channel()
+        kwargs = {}
+        if ping:
+            users = [discord.Object(id=u) for u in ping]
+            kwargs["allowed_mentions"] = discord.AllowedMentions(
+                everyone=False, roles=False, users=users
+            )
         for part in chunks(text):
-            message = await channel.send(part)
+            message = await channel.send(part, **kwargs)
         return message.id
 
     async def _edit(self, message_id: int, text: str) -> None:

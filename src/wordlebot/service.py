@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, fields, replace
 from datetime import date, datetime, timedelta
+from typing import Protocol
 
 from . import golf, leaderboard
 from .config import Config, Overrides, is_editable, parse_value, with_overrides
@@ -29,8 +30,17 @@ from .words import WordLists
 
 log = logging.getLogger(__name__)
 
-# Sends text to the channel and returns the id of the message it created.
-Send = Callable[[str], Awaitable[int]]
+
+class Send(Protocol):
+    """Sends text to the channel and returns the id of the message it created.
+
+    Mentions in the text don't ping anyone, except the users in `ping` (passed
+    only when there are some).
+    """
+
+    def __call__(self, text: str, *, ping: Collection[int] = ...) -> Awaitable[int]: ...
+
+
 # Replaces the text of one of the bot's messages in the channel.
 EditMessage = Callable[[int, str], Awaitable[None]]
 
@@ -455,15 +465,17 @@ class WordleService:
         starter = self.db.starter_for_date(target)
         if starter is None:
             starter = self.db.add_starter(await self.choose_starter(target, today=today))
+        nudge, ping = self.golf_nudge(today) if scheduled else ("", [])
+        kwargs = {"ping": ping} if ping else {}
         if starter.announced:
             if scheduled:
                 # Already announced earlier (e.g. /reroll), so remind instead.
-                await send(REMINDER_PREFIX + starter_announcement(starter))
+                await send(REMINDER_PREFIX + starter_announcement(starter) + nudge, **kwargs)
                 self.db.mark_daily_post_completed(target)
                 log.info("Starter for %s already announced; sent reminder", target)
             return
         prefix = LATE_PREFIX if post.kind == LATE else ""
-        message_id = await send(prefix + starter_announcement(starter))
+        message_id = await send(prefix + starter_announcement(starter) + nudge, **kwargs)
         self.db.mark_announced(target, message_id, daily_post=scheduled)
         log.info("Posted starter %s for %s (%s)", starter.word, target, post.kind)
 
@@ -511,6 +523,46 @@ class WordleService:
             sent.append((await send((prefix if i == 0 else "") + message), message))
         self.db.mark_golf_posted(milestone.first, milestone.holes, sent)
         log.info("Posted golf round %d after %d holes", milestone.round_no, milestone.holes)
+
+    def golf_unplayed(self, today: date) -> tuple[golf.Milestone, list[int]] | None:
+        """Today's hole (as a milestone through it) and the players on the current
+        round's card who haven't submitted a share for it, by user id.
+
+        A player is on the card once they have a counted score for an earlier hole
+        of the round, so on hole 1 nobody is. Any submission counts as played, even
+        one still pending or a mismatch. None when there's nothing to remind about:
+        golf is off, the reminder is off, the round hasn't started, or today's
+        puzzle isn't still to be played before the target (`target_offset_days = 0`
+        announces today's own starter, so nobody can have played it yet).
+        """
+        cfg = self.config.golf
+        anchor = self.golf_anchor()
+        if not (cfg.enabled and cfg.remind_unplayed) or anchor is None:
+            return None
+        if self.target_date(today) <= today:
+            return None
+        number = puzzle_number(today, self.launch)
+        if number < anchor:
+            return None
+        first = golf.round_start(number, anchor)
+        hole = golf.Milestone(golf.round_no(number, anchor), first, number - first + 1)
+        active = {s.user_id for s in self._counted(first, number - 1)} if number > first else set()
+        played = {s.user_id for s in self.db.scores_for_puzzle(number)}
+        return hole, sorted(active - played)
+
+    def golf_nudge(self, today: date) -> tuple[str, list[int]]:
+        """The daily post's golf line, mentioning the players still to play today's
+        hole, and their ids to ping; ("", []) when nobody is."""
+        found = self.golf_unplayed(today)
+        if found is None or not found[1]:
+            return "", []
+        hole, users = found
+        mentions = " ".join(f"<@{u}>" for u in users)
+        return (
+            f"\n\n⛳ **Golf round {hole.round_no}, hole {hole.holes}** "
+            f"(Wordle {hole.last:,}) is still to play today:\n{mentions}",
+            users,
+        )
 
     async def _golf_score_edited(
         self, number: int, send: Send | None, edit_message: EditMessage | None

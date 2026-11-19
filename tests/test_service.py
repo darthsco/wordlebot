@@ -51,14 +51,17 @@ class Channel:
 
     def __init__(self):
         self.sent = []
+        self.pinged = {}  # message id -> user ids its mentions may ping
         self.fail = 0
 
-    async def send(self, text):
+    async def send(self, text, *, ping=()):
         await asyncio.sleep(0)  # yield, like a real send, so overlapping callers interleave
         if self.fail:
             self.fail -= 1
             raise ConnectionError("network blip")
         self.sent.append(text)
+        if ping:
+            self.pinged[len(self.sent)] = list(ping)
         return len(self.sent)
 
     def starters(self):

@@ -55,8 +55,10 @@ class DiscordChannel(Channel):
     def __init__(self):
         super().__init__()
         self.shares = {}
+        self.allowed = []  # each send's allowed_mentions, or None for the client default
 
-    async def send(self, text):
+    async def send(self, text, allowed_mentions=None):
+        self.allowed.append(allowed_mentions)
         return Message(await super().send(text))
 
     def get_partial_message(self, message_id):
@@ -99,6 +101,16 @@ def test_failed_tick_is_logged_and_the_next_one_retries(tmp_path, caplog):
     assert [word_in(t) for t in channel.sent] == [picked.word]
     asyncio.run(bot._reconcile())
     assert len(channel.sent) == 1
+
+
+def test_send_pings_only_the_users_asked_for(tmp_path):
+    bot, _, channel = make_bot(tmp_path)
+    asyncio.run(bot._send("hello <@1> <@2> @everyone"))
+    asyncio.run(bot._send("golf <@1> <@2>", ping=[2]))
+    assert channel.allowed[0] is None  # the client's AllowedMentions.none()
+    allowed = channel.allowed[1]
+    assert [u.id for u in allowed.users] == [2]
+    assert allowed.everyone is False and allowed.roles is False
 
 
 class Interaction:

@@ -355,3 +355,65 @@ def test_an_edit_outside_posted_rounds_changes_nothing(tmp_path):
     edit = service.plan_delete(ANCHOR + 9, 1)
     asyncio.run(service.apply_edit(edit, ADMIN, "test", channel.send, edits))
     assert len(channel.sent) == 2
+
+
+# --- unplayed-hole reminder ---------------------------------------------------
+
+HOLE_4 = TODAY + timedelta(days=3)  # puzzle 15, hole 4 of round 1
+
+
+def test_daily_post_pings_round_players_who_havent_played_today(tmp_path):
+    service, clock, channel = make(tmp_path)
+    service.db.add_score(score(ANCHOR, 1, 4))
+    service.db.add_score(score(ANCHOR + 1, 2, 3))
+    service.db.add_score(score(ANCHOR + 2, 3, 5))
+    service.db.add_score(score(ANCHOR + 3, 3, 4, status=MISMATCH))  # played today, if not well
+    service.db.add_score(score(ANCHOR + 1, 4, 4, status=MISMATCH))  # never counted: not on the card
+    service.db.add_score(score(ANCHOR + 3, 5, 4))  # first hole today: already played
+
+    clock.set(HOLE_4, 20, 0)
+    asyncio.run(service.post_due(channel.send))
+    [post] = [t for t in channel.starters() if "LATE" not in t]
+    assert post.startswith("🟩")
+    head, nudge = post.split("\n\n⛳ ")
+    assert "Starting word" in head and "<@" not in head
+    assert nudge == "**Golf round 1, hole 4** (Wordle 15) is still to play today:\n<@1> <@2>"
+    assert channel.pinged == {channel.sent.index(post) + 1: [1, 2]}
+
+
+def test_reminder_post_carries_the_golf_line_too(tmp_path):
+    service, clock, channel = make(tmp_path)
+    service.db.add_score(score(ANCHOR, 1, 4))
+    clock.set(TODAY + timedelta(days=1), 12, 0)
+    asyncio.run(service.reroll(channel.send))  # announces before the daily post
+    clock.set(TODAY + timedelta(days=1), 20, 0)
+    asyncio.run(service.post_due(channel.send))
+    assert channel.sent[-1].startswith("⏰") and channel.sent[-1].endswith("\n<@1>")
+    assert channel.pinged[len(channel.sent)] == [1]
+
+
+def test_no_golf_line_when_nobody_is_owed_a_reminder(tmp_path):
+    service, clock, channel = make(tmp_path)
+    # Hole 1: nobody is on the round's card yet.
+    service.db.add_score(score(ANCHOR - 1, 1, 4))  # before the round: not active
+    assert service.golf_nudge(TODAY) == ("", [])
+    asyncio.run(service.post_due(channel.send))
+    assert "⛳" not in channel.sent[-1] and channel.pinged == {}
+
+    # A new round starts from scratch: round 1's players aren't on round 2's card.
+    service.db.add_score(score(ANCHOR, 1, 4))
+    round_2 = puzzle_date(ANCHOR + 18, LAUNCH)
+    assert service.golf_unplayed(round_2) == (Milestone(2, ANCHOR + 18, 1), [])
+    assert service.golf_nudge(round_2 + timedelta(days=1))[1] == []
+
+    # Off, or golf off, or the starter is for today's own puzzle.
+    assert service.golf_nudge(TODAY + timedelta(days=1))[1] == [1]
+    with_golf(service, remind_unplayed=False)
+    assert service.golf_nudge(TODAY + timedelta(days=1)) == ("", [])
+    with_golf(service, enabled=False)
+    assert service.golf_nudge(TODAY + timedelta(days=1)) == ("", [])
+    with_golf(service)
+    service.config = replace(
+        service.config, schedule=replace(service.config.schedule, target_offset_days=0)
+    )
+    assert service.golf_nudge(TODAY + timedelta(days=1)) == ("", [])

@@ -8,6 +8,7 @@ What counts as a breaking change: anything that makes an operator or player chan
 
 ### Added
 
+- Golf: the daily starter post now ends with a line @mentioning the players in the current round who haven't shared a result for today's hole yet (they are pinged; nobody else is). A player joins a round's list with their first counted hole in it, so hole 1 has no reminder. Turn it off with `[golf] remind_unplayed = false`. Not sent with `target_offset_days = 0`.
 - Admin panel: a Golf tab (shown when `[golf] enabled`, next to Scores) with the full leaderboard of the current round, through yesterday's puzzle, then every earlier round, newest first. Each round has an 18-hole scorecard, marked as golf cards are: circles for birdies and eagles, squares for bogeys, and a gold badge for a hole in one.
 
 ## [0.3.0] - 2026-11-17

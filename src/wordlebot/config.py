@@ -105,6 +105,7 @@ class GolfConfig:
     missed_posts: str = "latest"
     card_max_players: int = 10
     on_score_edit: str = "none"
+    remind_unplayed: bool = True
 
     def post_time_local(self, tz: ZoneInfo) -> time:
         hour, minute = (int(p) for p in self.post_time.split(":"))
