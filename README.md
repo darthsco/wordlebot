@@ -32,20 +32,20 @@ A Discord bot for friendly Wordle competition. Every evening it posts **tomorrow
 
 ## Slash commands
 
-The bot sends replies by DM. If your DMs are closed, the reply appears only to you.
+The bot has a single slash command, `/wordlebot`, so it doesn't crowd or clash with other bots' commands. Each operation is a subcommand typed after it, with its options after that: `/wordlebot results puzzle:12`. The bot sends replies by DM. If your DMs are closed, the reply appears only to you.
 
 | Command | What it does |
 |---|---|
-| `/starter` | Today's and the upcoming starting word |
-| `/results [puzzle]` | Results for one puzzle. Defaults to the puzzle the daily post reports on: today's, or yesterday's if `target_offset_days = 0` |
-| `/leaderboard <weekly\|monthly\|all-time>` | Standings |
-| `/golf` | The golf round in progress, through yesterday's puzzle (or the round that just ended) |
-| `/history [count]` | Our recent starters (default 10, up to 100). Answers appear behind spoiler tags 2 days after each puzzle |
-| `/config` | The bot's current settings |
-| `/version` | Which version and commit of the bot is running |
-| `/reroll` | **Admin only:** pick and post a new upcoming starter |
+| `/wordlebot starter` | Today's and the upcoming starting word |
+| `/wordlebot results [puzzle]` | Results for one puzzle. Defaults to the puzzle the daily post reports on: today's, or yesterday's if `target_offset_days = 0` |
+| `/wordlebot leaderboard <weekly\|monthly\|all-time>` | Standings |
+| `/wordlebot golf` | The golf round in progress, through yesterday's puzzle (or the round that just ended) |
+| `/wordlebot history [count]` | Our recent starters (default 10, up to 100). Answers appear behind spoiler tags 2 days after each puzzle |
+| `/wordlebot config` | The bot's current settings |
+| `/wordlebot version` | Which version and commit of the bot is running |
+| `/wordlebot reroll` | **Admin only:** pick and post a new upcoming starter |
 
-`/reroll` is for members with **Manage Server** or a role listed in `admin_role_ids`. It is refused once the starter's puzzle has started or anyone has submitted a result for it, so it never works with `target_offset_days = 0`, where the starter is for a puzzle that is already live. It never picks a word that date has already had. Its confirmation is shown only to you instead of by DM.
+`/wordlebot reroll` is for members with **Manage Server** or a role listed in `admin_role_ids`. It is refused once the starter's puzzle has started or anyone has submitted a result for it, so it never works with `target_offset_days = 0`, where the starter is for a puzzle that is already live. It never picks a word that date has already had. Its confirmation is shown only to you instead of by DM.
 
 ## Setup
 
@@ -176,9 +176,9 @@ To change the schedule, edit the `OnCalendar` line in `/etc/systemd/system/wordl
 A web control panel served by the bot itself, for admins only. It is off by default.
 
 - **Dashboard:** Discord connection, uptime, version, today's and the upcoming starter, the next post time, anything owed, the solution cache, and pending scores. It refreshes every 30 seconds. Answers appear only once they could appear in Discord (2 days later), blurred until you hover.
-- **Actions:** reroll the upcoming starter (with the same guards as `/reroll`), run a posting tick now, and sync solutions to settle pending scores.
+- **Actions:** reroll the upcoming starter (with the same guards as `/wordlebot reroll`), run a posting tick now, and sync solutions to settle pending scores.
 - **Scores:** browse by puzzle or player. You can delete a score (it's kept and can be restored), set its status by hand, re-verify it by the rules (undoing a manual status), or add one from a member's share text when the bot missed it. Every change shows a preview first, including the player's all-time rank before and after, and needs a reason. The share's reaction in Discord is updated to match.
-- **Golf:** when golf is enabled, the full leaderboard of the current round (through yesterday's puzzle, as `/golf` shows it) and of every earlier round, newest first. Unlike the posted cards, it lists everyone, and each round's hole-by-hole scorecard expands below its leaderboard.
+- **Golf:** when golf is enabled, the full leaderboard of the current round (through yesterday's puzzle, as `/wordlebot golf` shows it) and of every earlier round, newest first. Unlike the posted cards, it lists everyone, and each round's hole-by-hole scorecard expands below its leaderboard.
 - **Config:** edit the settings that can change while the bot runs: schedule time and offset, selection, scores, `fail_score`, `admin_role_ids` and announcements. They take effect at once and are stored as overrides in the database on top of `config.toml`, which stays read-only. Each overridden setting can be reset to the file's value. The rest (guild and channel, timezone, game rules, paths, the solution source, `[web]`) are shown read-only; change those in `config.toml` and restart.
 - **Announcements:** each kind of admin action can post a note in the channel. Each one has its own switch in `[announce]`, all off by default. Notes name the admin but never the reason.
 - **Audit log:** every sign-in, failed sign-in, lockout and admin change, with who, when, from where and why.

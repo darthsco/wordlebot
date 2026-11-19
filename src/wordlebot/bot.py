@@ -4,7 +4,9 @@ There is no timer aimed at the post time. A short-interval loop asks the service
 what the channel is owed and sends it, so a missed or failed post is made up on a
 later tick and nothing is posted twice.
 
-Slash command output is delivered by DM (with an ephemeral fallback if the user's
+The bot registers a single slash command, `/wordlebot`, with each operation a
+subcommand (`/wordlebot results puzzle:12`), so it shares the command picker with
+other bots without name collisions. Its output is delivered by DM (with an ephemeral fallback if the user's
 DMs are closed) so leaderboards don't clutter the channel. Every command defers
 its interaction before doing anything else: Discord drops an interaction that is
 not acknowledged within 3 seconds, while a deferred one can be answered with
@@ -41,6 +43,7 @@ RECONCILE_SECONDS = 60  # also the retry delay after a failed post
 # Discord's 3-second acknowledgement deadline.
 REPORT_REFRESH_SECONDS = 10
 COMMAND_FAILED = "Something went wrong; see the bot's log."
+COMMAND = "wordlebot"  # the one top-level slash command; operations are subcommands
 REROLL_IN_PLAY = (
     "Not rerolling: with `target_offset_days = 0` the starter is for today's puzzle, "
     "which is already live, so members may have opened with it. "
@@ -77,7 +80,7 @@ class WordleBot(discord.Client):
         self.service = service
         self.started_at = datetime.now(timezone.utc)
         self.tree = app_commands.CommandTree(self)
-        # Serializes everything that picks or announces a starter (the loop, /reroll).
+        # Serializes everything that picks or announces a starter (the loop, reroll).
         self._post_lock = asyncio.Lock()
         self._background: set[asyncio.Task[None]] = set()  # keeps tasks referenced
         self.reconcile = tasks.loop(seconds=RECONCILE_SECONDS)(self._reconcile)
@@ -302,18 +305,23 @@ class WordleBot(discord.Client):
                 await callback(interaction, *args, **kwargs)
             except Exception:
                 # Without a followup the user would watch "thinking…" until it expires.
-                log.exception("Command /%s failed", callback.__name__)
+                log.exception("Command /%s %s failed", COMMAND, callback.__name__)
                 try:
                     await interaction.followup.send(COMMAND_FAILED, ephemeral=True)
                 except discord.HTTPException:
-                    log.warning("Could not report the failure of /%s", callback.__name__)
+                    log.warning(
+                        "Could not report the failure of /%s %s", COMMAND, callback.__name__
+                    )
 
         return wrapper
 
     def _register_commands(self) -> None:
-        tree, service = self.tree, self.service
+        service = self.service
+        group = app_commands.Group(
+            name=COMMAND, description="Wordle starters, results and standings"
+        )
 
-        @tree.command(description="Show today's and the upcoming starting word")
+        @group.command(description="Show today's and the upcoming starting word")
         @self._deferred
         async def starter(interaction: discord.Interaction) -> None:
             lines = []
@@ -324,7 +332,7 @@ class WordleBot(discord.Client):
                 lines.append(f"Next (#{upcoming.puzzle_number:,}): `{upcoming.word.upper()}`")
             await self._dm(interaction, "\n".join(lines) or "No starter posted yet.")
 
-        @tree.command(
+        @group.command(
             description="Results for one puzzle (default: the one the daily post reports on)"
         )
         @app_commands.describe(
@@ -335,7 +343,7 @@ class WordleBot(discord.Client):
             await self._refresh_for_report()
             await self._dm(interaction, service.daily_results(puzzle))
 
-        @tree.command(description="Standings for a period")
+        @group.command(description="Standings for a period")
         @app_commands.choices(
             period=[
                 app_commands.Choice(name="weekly", value="weekly"),
@@ -355,13 +363,13 @@ class WordleBot(discord.Client):
             await self._refresh_for_report()
             await self._dm(interaction, report())
 
-        @tree.command(description="The golf round in progress: par 4 a puzzle, 18 to a round")
+        @group.command(description="The golf round in progress: par 4 a puzzle, 18 to a round")
         @self._deferred
         async def golf(interaction: discord.Interaction) -> None:
             await self._refresh_for_report()
             await self._dm(interaction, service.golf_standings())
 
-        @tree.command(description="Our recent starting words")
+        @group.command(description="Our recent starting words")
         @app_commands.describe(count="How many to show (default 10)")
         @self._deferred
         async def history(
@@ -369,7 +377,7 @@ class WordleBot(discord.Client):
         ) -> None:
             await self._dm(interaction, service.history(count))
 
-        @tree.command(description="Show the bot's configuration")
+        @group.command(description="Show the bot's configuration")
         @self._deferred
         async def config(interaction: discord.Interaction) -> None:
             cfg = asdict(self.config)
@@ -380,12 +388,12 @@ class WordleBot(discord.Client):
             )
             await self._dm(interaction, f"```toml\n{body}\n```")
 
-        @tree.command(description="Show which version of the bot is running")
+        @group.command(description="Show which version of the bot is running")
         @self._deferred
         async def version(interaction: discord.Interaction) -> None:
             await self._dm(interaction, version_info())
 
-        @tree.command(description="(Admin) Pick and post a new upcoming starting word")
+        @group.command(description="(Admin) Pick and post a new upcoming starting word")
         @self._deferred
         async def reroll(interaction: discord.Interaction) -> None:
             if not self._is_admin(interaction):
@@ -411,3 +419,5 @@ class WordleBot(discord.Client):
                 await interaction.followup.send("Reroll failed; see the log.", ephemeral=True)
                 return
             await interaction.followup.send(f"Rerolled to `{starter.word.upper()}`.", ephemeral=True)
+
+        self.tree.add_command(group)

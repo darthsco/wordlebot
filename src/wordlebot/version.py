@@ -40,7 +40,7 @@ def _git_commit() -> str:
 
 
 def version_info(markdown: bool = True) -> str:
-    """For `/version` (Discord markdown), or as plain text for the admin panel."""
+    """For `/wordlebot version` (Discord markdown), or as plain text for the admin panel."""
     name, sha = ("**wordlebot**", f"`{commit()}`") if markdown else ("wordlebot", commit())
     return "\n".join(
         [

@@ -31,10 +31,10 @@ Posting is a 60s reconciler loop (`bot._reconcile`), not a timer aimed at `post_
 
 - **The database is the record of what reached the channel.** A pick is saved before it is sent, with `starters.message_id` NULL, and marked announced after. A failed or interrupted send re-announces the same word; worst case it appears twice, never as two different words.
 - `daily_posts` records the scheduled post per target date (`results_at`, `completed_at`), so a retry never repeats the results and a restart after post time never repeats the post.
-- Kinds of owed post: `SCHEDULED` (results, then the starter, or a REMINDER if it was already announced, e.g. by `/reroll`), `UNANNOUNCED` (saved pick whose send failed), `LATE` (a date already in play with no announced starter).
+- Kinds of owed post: `SCHEDULED` (results, then the starter, or a REMINDER if it was already announced, e.g. by `/wordlebot reroll`), `UNANNOUNCED` (saved pick whose send failed), `LATE` (a date already in play with no announced starter).
 - **LATE gating:** a missing starter is owed only for dates after `db.first_starter_date()`. A new install has never promised anything, so an empty database never posts LATE. A saved-but-unannounced pick is always owed.
-- Results in the daily post, and the `/results` default, are for `results_date()` = `min(target - 1 day, today)`: today's puzzle with the default offset, yesterday's with `target_offset_days = 0`.
-- Anything that picks or announces a starter holds `bot._post_lock` (the loop and `/reroll`).
+- Results in the daily post, and the `/wordlebot results` default, are for `results_date()` = `min(target - 1 day, today)`: today's puzzle with the default offset, yesterday's with `target_offset_days = 0`.
+- Anything that picks or announces a starter holds `bot._post_lock` (the loop and `reroll`).
 - `_reconcile` catches everything, because `tasks.loop` dies on an unhandled exception.
 
 ## Spoiler rules (load-bearing)
@@ -47,13 +47,13 @@ Posting is a 60s reconciler loop (`bot._reconcile`), not a timer aimed at `post_
 
 `https://www.nytimes.com/svc/wordle/v2/YYYY-MM-DD.json`. The puzzle number players see is `days_since_launch` (= days since 2021-06-19), **not** the JSON `id`. Sync fetches only dates missing from the cache, so a normal day is one request; the first run backfills ~2k days in about a minute.
 
-Today's solution is fetched lazily by whichever needs it first: the reconciler tick after local midnight, a share, `/results` or `/leaderboard`, or the daily post. These call `refresh_if_missing`, which never raises, never fetches a date after today, and after an attempt that didn't produce the solution leaves the source alone for 15 minutes (`REFRESH_RETRY`).
+Today's solution is fetched lazily by whichever needs it first: the reconciler tick after local midnight, a share, the `results` or `leaderboard` subcommand, or the daily post. These call `refresh_if_missing`, which never raises, never fetches a date after today, and after an attempt that didn't produce the solution leaves the source alone for 15 minutes (`REFRESH_RETRY`).
 
 ## Selection
 
 Candidate pool: `data/words/answers-5.txt` plus every historical solution ("answer-like"); `random_all_valid` adds `allowed-5.txt`. Exclusion windows (own starters, past solutions) use `0` = off and `-1` = all time, and are relaxed if they would empty the pool; `forbidden` words never are. Forbidden: the target's answer and, on a reroll, every word that date has had (the current one plus `retired_starters`, written by `db.save_starter` when it replaces a word).
 
-`/reroll` (`WordleService.reroll`) is refused when the target puzzle has started (`PuzzleInPlay`; always the case with `target_offset_days = 0`) or any score exists for it (`SubmissionsExist`): shares are verified against the starter on record, so a new word would turn honest openers into mismatches.
+`/wordlebot reroll` (`WordleService.reroll`) is refused when the target puzzle has started (`PuzzleInPlay`; always the case with `target_offset_days = 0`) or any score exists for it (`SubmissionsExist`): shares are verified against the starter on record, so a new word would turn honest openers into mismatches.
 
 ## Scores
 
@@ -78,7 +78,7 @@ Competition ranking (1, 2, 2, 4), decided on lower average, then more games; a t
 - No backfill: golf shipped while the only install had played 3 holes, so existing history is the start of round 1.
 - `golf.format_round` keeps every message under `MESSAGE_LIMIT` (a long board or card continues in a new message with its header rows repeated), so `bot.chunks` never splits a code block. `card_max_players` caps the cards (0 = everyone); the board always lists everyone.
 - `golf_post_messages` stores each post's (message id, text). After a panel score edit, `apply_edit` calls `_golf_score_edited`, which regenerates every post covering that puzzle and, if it differs: `on_score_edit = "edit"` rewrites the messages (`bot._edit` via `panel_edit`), and `"correct"` posts a `GOLF_CORRECTED_PREFIX` copy. `"edit"` falls back to a correction when the message count changed. A changed `card_max_players` also counts as a difference.
-- The panel's Golf tab (`/golf`, 404 and hidden from the nav while `[golf] enabled` is off) renders `golf_rounds`: the current round as `/golf` sees it, then every earlier round complete, newest first.
+- The panel's Golf tab (`/golf`, 404 and hidden from the nav while `[golf] enabled` is off) renders `golf_rounds`: the current round as `/wordlebot golf` sees it, then every earlier round complete, newest first.
 - Card names go through `golf._card_name` (no backticks, truncated); names outside the code block go through `escape_name`.
 
 ## Admin panel
@@ -102,6 +102,7 @@ Off unless `[web] enabled`. `__main__._run` starts it (`web.start`) next to the 
 
 - The **Message Content** privileged intent must be enabled in the Developer Portal, or score intake silently sees empty messages. Swapping reactions on older messages needs Add Reactions and Read Message History.
 - Slash commands sync to `discord.guild_id` only (instant updates; no global commands).
+- The bot has one top-level slash command, `/wordlebot` (`bot.COMMAND`, an `app_commands.Group`); every operation is a subcommand of it, so a new command is `@group.command` in `_register_commands`, never `@tree.command`. Guild sync replaces the whole set, so a removed or renamed command needs no cleanup.
 - Every slash command is wrapped in `@self._deferred` as its innermost decorator: it defers ephemerally first (Discord drops an interaction not acknowledged within 3 seconds) and reports failures. Command bodies answer through `interaction.followup` or `_dm` only.
 - Slash command output goes by DM (`_dm`), falling back to ephemeral followups when DMs are closed.
 - The client is built with `AllowedMentions.none()`; a message meant to ping must pass `allowed_mentions` at its call site. Display names are stored raw, so any output that echoes one passes it through `leaderboard.escape_name`.
@@ -113,7 +114,7 @@ Off unless `[web] enabled`. `__main__._run` starts it (`web.start`) next to the 
 - Env overrides: `WORDLEBOT_CONFIG` (config path), `WORDLEBOT_DATABASE_PATH` (beats `[storage].database_path`) and `WORDLEBOT_WEB_HOST` (beats `[web].host`). The image sets all three, so state lands in the `/app/state` volume and the panel listens on the container's interfaces.
 - The `caddy` service (profile `web`, enabled by `COMPOSE_PROFILES=web` in `.env`) terminates TLS for `PANEL_DOMAIN` using `Caddyfile`, and proxies to `wordlebot:8080`.
 - The image installs runtime deps from `requirements.txt` (exact pins including transitives, resolved inside `python:3.13-slim`), then `pip install --no-deps .` and `pip check`, so timer rebuilds never pull new releases. A dependency change goes in `pyproject.toml` (loose range) **and** `requirements.txt`; the regeneration command is in that file's header.
-- `/version` reports `WORDLEBOT_COMMIT`, baked in by `update.sh` → compose build arg `GIT_COMMIT` → `ENV` in the image's last layer (the image has no `.git`). Since the SHA is in the image, every commit changes it, so `update.sh` recreates the container even for docs-only commits.
+- `/wordlebot version` reports `WORDLEBOT_COMMIT`, baked in by `update.sh` → compose build arg `GIT_COMMIT` → `ENV` in the image's last layer (the image has no `.git`). Since the SHA is in the image, every commit changes it, so `update.sh` recreates the container even for docs-only commits.
 - `tzdata` is a dependency because slim images ship no zoneinfo database.
 - Stop signal is SIGINT (`STOPSIGNAL` in the image, repeated in compose): Python as PID 1 ignores SIGTERM. `main()` catches the `KeyboardInterrupt`, logs "Shutting down" and exits 0.
 - The `config.toml` bind mount uses `create_host_path: false`, so a missing file is an error instead of a root-owned directory.
@@ -126,5 +127,5 @@ SemVer; `CHANGELOG.md` (Keep a Changelog) defines what counts as breaking: confi
 - Every user- or operator-visible change adds a line under `## [Unreleased]` in the same commit (Added / Changed / Fixed / Removed). Internal refactors and tests don't.
 - To release: rename `[Unreleased]` to `[X.Y.Z] - YYYY-MM-DD`, add a fresh empty `[Unreleased]`, update the compare links at the bottom, bump `version` in `pyproject.toml`, commit "Release X.Y.Z", then `git tag -a vX.Y.Z -m "wordlebot X.Y.Z"`. Push the commit and tag only when asked.
 - After pushing a tag, create its GitHub release: `gh release create vX.Y.Z --verify-tag --title "wordlebot X.Y.Z" --notes-file NOTES --latest`, where NOTES is that version's `CHANGELOG.md` section (the lines after its heading, without the link references), with relative links like `(README.md#...)` rewritten to `https://github.com/darthsco/wordlebot/blob/vX.Y.Z/...` because they don't resolve on the release page.
-- The version lives only in `pyproject.toml`; `/version` reads it from package metadata (no setuptools-scm: the image has no `.git`).
+- The version lives only in `pyproject.toml`; `/wordlebot version` reads it from package metadata (no setuptools-scm: the image has no `.git`).
 - Tags are labels, not deploy gates: `update.sh` deploys every commit on `main`.

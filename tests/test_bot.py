@@ -17,7 +17,7 @@ from test_service import (
 )
 from test_solutions import FakeSource
 
-from wordlebot.bot import COMMAND_FAILED, REROLL_IN_PLAY, WordleBot
+from wordlebot.bot import COMMAND, COMMAND_FAILED, REROLL_IN_PLAY, WordleBot
 from wordlebot.service import REROLL_PREFIX
 
 
@@ -157,9 +157,13 @@ class User:
         self.dms.append(text)
 
 
+def subcommand(bot, name):
+    return bot.tree.get_command(COMMAND).get_command(name)
+
+
 def reroll(bot):
     interaction = Interaction()
-    asyncio.run(bot.tree.get_command("reroll").callback(interaction))
+    asyncio.run(subcommand(bot, "reroll").callback(interaction))
     return interaction.replies
 
 
@@ -206,7 +210,7 @@ def test_results_command_defaults_to_the_puzzle_the_daily_post_reports(tmp_path)
     bot, _, _ = make_bot(tmp_path, hour=7, target_offset_days=0, post_time="07:00")
     assert "Wordle 11" in command(bot, "results", None)
     assert "Wordle 12" in command(bot, "results", 12)
-    description = bot.tree.get_command("results").description
+    description = subcommand(bot, "results").description
     assert "daily post" in description and len(description) <= 100
 
 
@@ -294,7 +298,7 @@ def test_a_later_share_settles_earlier_pending_ones(tmp_path):
 def invoke(bot, name, *args, dms_open=True):
     interaction = Interaction()
     interaction.user.dms_open = dms_open
-    asyncio.run(bot.tree.get_command(name).callback(interaction, *args))
+    asyncio.run(subcommand(bot, name).callback(interaction, *args))
     return interaction
 
 
@@ -335,9 +339,16 @@ COMMANDS = [
 ]
 
 
+def test_the_bot_registers_one_top_level_command(tmp_path):
+    bot, _, _ = make_bot(tmp_path)
+    (group,) = bot.tree.get_commands()
+    assert group.name == COMMAND == "wordlebot"
+    assert isinstance(group, discord.app_commands.Group)
+    assert sorted(c.name for c in group.commands) == sorted(c[0] for c in COMMANDS)
+
+
 def test_every_command_defers_before_doing_anything_else(tmp_path):
     bot, _, _ = make_bot(tmp_path)
-    assert sorted(c.name for c in bot.tree.get_commands()) == sorted(c[0] for c in COMMANDS)
     for name, *args in COMMANDS:
         interaction = invoke(bot, name, *args)  # the fake raises on a second response
         assert interaction.events[0] == "defer", name
@@ -346,7 +357,9 @@ def test_every_command_defers_before_doing_anything_else(tmp_path):
 
 def test_command_options_survive_the_defer_wrapper(tmp_path):
     bot, _, _ = make_bot(tmp_path)
-    options = {c.name: [p.name for p in c.parameters] for c in bot.tree.get_commands()}
+    options = {
+        c.name: [p.name for p in c.parameters] for c in bot.tree.get_command(COMMAND).commands
+    }
     assert options == {
         "starter": [],
         "results": ["puzzle"],
@@ -386,7 +399,7 @@ def test_a_failing_command_tells_the_user_and_logs(tmp_path, caplog):
     with caplog.at_level(logging.ERROR):
         interaction = invoke(bot, "history", 10)  # must not raise
     assert interaction.replies == [COMMAND_FAILED]
-    assert "Command /history failed" in caplog.text and "database is locked" in caplog.text
+    assert "Command /wordlebot history failed" in caplog.text and "database is locked" in caplog.text
 
 
 def test_a_slow_refresh_does_not_hold_up_a_report(tmp_path, monkeypatch):
@@ -402,7 +415,7 @@ def test_a_slow_refresh_does_not_hold_up_a_report(tmp_path, monkeypatch):
 
     async def run():
         interaction = Interaction()
-        await bot.tree.get_command("results").callback(interaction, None)
+        await subcommand(bot, "results").callback(interaction, None)
         assert not finished and interaction.replies == ["Sent you a DM. 📬"]
         await asyncio.gather(*bot._background)  # carries on in the background
         assert finished

@@ -240,7 +240,7 @@ class Database:
 
         A starter announced at or after its daily post's scheduled time is taken to
         have had that post, so upgrading after post time doesn't repeat today's
-        results and starter. One announced earlier (by `/reroll`) has not: its
+        results and starter. One announced earlier (by a reroll) has not: its
         daily post is still owed, as a reminder.
         """
         rows = self.conn.execute(

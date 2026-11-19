@@ -239,7 +239,7 @@ class WordleService:
         )
 
     def results_date(self, today: date | None = None) -> date:
-        """The puzzle the daily post reports on, and `/results` defaults to.
+        """The puzzle the daily post reports on, and `/wordlebot results` defaults to.
 
         It is the one before the target, the last puzzle played with a starter
         before the one being announced: today's with the default offset of 1,
@@ -469,7 +469,7 @@ class WordleService:
         kwargs = {"ping": ping} if ping else {}
         if starter.announced:
             if scheduled:
-                # Already announced earlier (e.g. /reroll), so remind instead.
+                # Already announced earlier (e.g. by a reroll), so remind instead.
                 await send(REMINDER_PREFIX + starter_announcement(starter) + nudge, **kwargs)
                 self.db.mark_daily_post_completed(target)
                 log.info("Starter for %s already announced; sent reminder", target)
@@ -598,7 +598,7 @@ class WordleService:
         self, today: date | None = None
     ) -> list[tuple[golf.Milestone, list[tuple[int, golf.Player]]]]:
         """Every round so far with its full leaderboard, newest first: the current
-        one through yesterday's puzzle (as `/golf` shows it), then each earlier
+        one through yesterday's puzzle (as `/wordlebot golf` shows it), then each earlier
         round, complete. Empty until the first hole is over."""
         today = today or self.today()
         anchor = self.golf_anchor()
@@ -616,7 +616,7 @@ class WordleService:
         return [(m, golf.card(scores, m, fail_score)) for m in rounds]
 
     def golf_standings(self, today: date | None = None) -> str:
-        """`/golf`: the current round through the last puzzle that is over everywhere
+        """`/wordlebot golf`: the current round through the last puzzle that is over everywhere
         (yesterday's), or the round that just ended."""
         today = today or self.today()
         anchor = self.golf_anchor()
@@ -725,7 +725,7 @@ class WordleService:
     def daily_results(self, number: int | None = None, today: date | None = None) -> str:
         """Results for puzzle `number`; by default the one for `results_date`.
 
-        `number` is user input (`/results puzzle:`), so one outside the playable
+        `number` is user input (`/wordlebot results puzzle:`), so one outside the playable
         range gets a plain message instead of reaching the database.
         """
         if number is None:

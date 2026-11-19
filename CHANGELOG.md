@@ -6,6 +6,10 @@ What counts as a breaking change: anything that makes an operator or player chan
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** the slash commands are now subcommands of a single `/wordlebot` command, so the bot no longer takes up common names like `/results` or `/config` in the command picker. `/starter` is now `/wordlebot starter`, `/results puzzle:12` is `/wordlebot results puzzle:12`, and so on for `leaderboard`, `golf`, `history`, `config`, `version` and `reroll`, with the same options as before. The old commands disappear from the server when the updated bot starts.
+
 ### Added
 
 - Golf: the daily starter post now ends with a line @mentioning the players in the current round who haven't shared a result for today's hole yet (they are pinged; nobody else is). A player joins a round's list with their first counted hole in it, so hole 1 has no reminder. Turn it off with `[golf] remind_unplayed = false`. Not sent with `target_offset_days = 0`.

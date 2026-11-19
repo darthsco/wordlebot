@@ -3,7 +3,7 @@
 [discord]
 guild_id = 0              # server ID; slash commands are synced to this guild (required to run)
 channel_id = 0            # channel for daily posts and score submissions (required to run)
-admin_role_ids = []       # roles allowed to use /reroll (members with Manage Server always can)
+admin_role_ids = []       # roles allowed to use /wordlebot reroll (members with Manage Server always can)
 
 [schedule]
 timezone = "America/New_York"
@@ -46,7 +46,7 @@ min_games_all_time = 5
 # Every puzzle is a par-4 hole; 18 in a row are a par-72 round, counted from the first
 # puzzle the bot picked a starter for. A missed or failed hole scores fail_score.
 # The morning after each front nine and each full round, the bot posts the round's
-# leaderboard and hole-by-hole card (/golf shows it any time).
+# leaderboard and hole-by-hole card (/wordlebot golf shows it any time).
 enabled = true
 post_time = "08:00"       # HH:MM (24-hour), local to [schedule] timezone
 # If the bot misses a post until the next one is due: "latest" posts only the newer
