@@ -6,6 +6,8 @@ What counts as a breaking change: anything that makes an operator or player chan
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-19
+
 ### Added
 
 - Admin panel: `[web] domain`, the panel's host name, which passkeys are tied to. It is required when the panel is enabled. The Docker setup fills it from `PANEL_DOMAIN` via the new `WORDLEBOT_WEB_DOMAIN` variable.
@@ -66,7 +68,8 @@ The first tagged release. It covers everything since the project began; `0.1.0` 
 
 See [Upgrading an existing install](README.md#upgrading-an-existing-install). The database migrates itself, and new settings have defaults.
 
-[Unreleased]: https://github.com/darthsco/wordlebot/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/darthsco/wordlebot/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/darthsco/wordlebot/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/darthsco/wordlebot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/darthsco/wordlebot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/darthsco/wordlebot/releases/tag/v0.2.0
