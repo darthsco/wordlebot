@@ -46,14 +46,14 @@ min_games_all_time = 5
 # Every puzzle is a par-4 hole; 18 in a row are a par-72 round, counted from the first
 # puzzle the bot picked a starter for. A missed or failed hole scores fail_score.
 # The morning after each front nine and each full round, the bot posts the round's
-# leaderboard and hole-by-hole card (/wordlebot golf shows it any time).
+# leaderboard, with its hole-by-hole scorecard as an image (/wordlebot golf shows it any time).
 enabled = true
 post_time = "08:00"       # HH:MM (24-hour), local to [schedule] timezone
 # If the bot misses a post until the next one is due: "latest" posts only the newer
 # one; "all" posts every missed one (since the last posted), oldest first.
 missed_posts = "latest"
-# Players on the hole-by-hole cards (the leaderboard always lists everyone).
-# 0 shows everyone, continuing a long card in further messages.
+# Players on the scorecard image (the leaderboard always lists everyone).
+# 0 shows everyone, however tall that makes the image.
 card_max_players = 10
 # When an admin edits a score in a round already posted: "none" leaves the post;
 # "edit" rewrites the posted messages; "correct" posts an updated, marked copy.

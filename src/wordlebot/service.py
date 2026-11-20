@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import random
 from collections.abc import Awaitable, Callable, Collection
@@ -10,7 +11,7 @@ from dataclasses import dataclass, fields, replace
 from datetime import date, datetime, timedelta
 from typing import Protocol
 
-from . import golf, leaderboard
+from . import golf, golf_card, leaderboard
 from .config import Config, Overrides, is_editable, parse_value, with_overrides
 from .db import Database, DeletedScore, Score, Starter
 from .game import Mark, puzzle_date, puzzle_number
@@ -31,18 +32,56 @@ from .words import WordLists
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class Attachment:
+    """A file sent with a message, e.g. a golf scorecard image."""
+
+    filename: str
+    data: bytes
+
+    @property
+    def sha(self) -> str:
+        return hashlib.sha256(self.data).hexdigest()
+
+
+@dataclass(frozen=True)
+class GolfMessage:
+    """One message of a golf report: text, and the card image on the last one."""
+
+    text: str
+    image: Attachment | None = None
+
+    @property
+    def stored(self) -> tuple[str, str | None]:
+        """What `golf_post_messages` keeps to tell whether a post changed."""
+        return self.text, self.image.sha if self.image else None
+
+
 class Send(Protocol):
     """Sends text to the channel and returns the id of the message it created.
 
     Mentions in the text don't ping anyone, except the users in `ping` (passed
-    only when there are some).
+    only when there are some). `image` is attached to the (last) message; it is
+    passed only when there is one.
     """
 
-    def __call__(self, text: str, *, ping: Collection[int] = ...) -> Awaitable[int]: ...
+    def __call__(
+        self, text: str, *, ping: Collection[int] = ..., image: Attachment | None = ...
+    ) -> Awaitable[int]: ...
 
 
-# Replaces the text of one of the bot's messages in the channel.
-EditMessage = Callable[[int, str], Awaitable[None]]
+class EditMessage(Protocol):
+    """Replaces the text of one of the bot's messages in the channel, and its
+    attachment with `image` (passed only when there is one)."""
+
+    def __call__(
+        self, message_id: int, text: str, *, image: Attachment | None = ...
+    ) -> Awaitable[None]: ...
+
+
+def _with_image(image: Attachment | None) -> dict[str, Attachment]:
+    """`image=` for a send or edit, left out when there is none."""
+    return {"image": image} if image is not None else {}
 
 # Kinds of owed post, see `WordleService.due_posts`.
 LATE = "late"  # the post for a date already in play was missed
@@ -510,18 +549,29 @@ class WordleService:
             done = [m for m in done if m.last > first + holes - 1]  # never go back
         return done
 
-    def golf_report(self, milestone: golf.Milestone, live: bool = False) -> list[str]:
-        """The round's leaderboard and cards as of `milestone`, one message each.
-        `live`: its last hole is today's, still in play (see `golf.card`)."""
+    def golf_report(self, milestone: golf.Milestone, live: bool = False) -> list[GolfMessage]:
+        """The round as of `milestone`: the leaderboard as text, with the scorecard
+        image attached to its last message. `live`: its last hole is today's, still
+        in play (see `golf.card`)."""
         scores = self._counted(milestone.first, milestone.last)
-        ranked = golf.card(scores, milestone, self.config.game.fail_score, live)
-        return golf.format_round(milestone, ranked, self.config.golf.card_max_players, live)
+        fail_score = self.config.game.fail_score
+        cap = self.config.golf.card_max_players
+        ranked = golf.card(scores, milestone, fail_score, live)
+        texts = golf.format_round(milestone, ranked, cap, live)
+        if not ranked:
+            return [GolfMessage(t) for t in texts]
+        image = Attachment(
+            golf_card.FILENAME, golf_card.render(milestone, ranked, fail_score, cap, live)
+        )
+        return [GolfMessage(t) for t in texts[:-1]] + [GolfMessage(texts[-1], image)]
 
     async def _post_golf(self, milestone: golf.Milestone, send: Send, prefix: str = "") -> None:
         report = self.golf_report(milestone)
         sent = []
         for i, message in enumerate(report):
-            sent.append((await send((prefix if i == 0 else "") + message), message))
+            text = (prefix if i == 0 else "") + message.text
+            message_id = await send(text, **_with_image(message.image))
+            sent.append((message_id, *message.stored))
         self.db.mark_golf_posted(milestone.first, milestone.holes, sent)
         log.info("Posted golf round %d after %d holes", milestone.round_no, milestone.holes)
 
@@ -578,19 +628,23 @@ class WordleService:
             milestone = golf.Milestone(golf.round_no(first, anchor), first, holes)
             posted = self.db.golf_post_messages(first, holes)
             report = self.golf_report(milestone)
-            if report == [text for _, text in posted]:
+            if [m.stored for m in report] == [(text, sha) for _, text, sha in posted]:
                 continue  # the edit didn't change this post
+            # An edit can replace an image but not add or remove one.
+            same_shape = len(report) == len(posted) and all(
+                (sha is None) == (new.image is None) for (_, _, sha), new in zip(posted, report)
+            )
             try:
-                if mode == "edit" and edit_message is not None and len(report) == len(posted):
-                    for (message_id, old), new in zip(posted, report):
-                        if old != new:
-                            await edit_message(message_id, new)
+                if mode == "edit" and edit_message is not None and same_shape:
+                    for (message_id, *old), new in zip(posted, report):
+                        if tuple(old) != new.stored:
+                            await edit_message(message_id, new.text, **_with_image(new.image))
                     self.db.mark_golf_posted(
-                        first, holes, [(mid, new) for (mid, _), new in zip(posted, report)]
+                        first, holes, [(mid, *new.stored) for (mid, _, _), new in zip(posted, report)]
                     )
                 else:
                     # A correction; also "edit" when the post now needs a different
-                    # number of messages than it was sent as.
+                    # number of messages, or images, than it was sent with.
                     await self._post_golf(milestone, send, GOLF_CORRECTED_PREFIX)
             except Exception:
                 log.exception("Could not update the golf post for round %d", milestone.round_no)
@@ -618,17 +672,17 @@ class WordleService:
             (m, golf.card(scores, m, fail_score)) for m in earlier
         ]
 
-    def golf_standings(self, today: date | None = None) -> str:
+    def golf_standings(self, today: date | None = None) -> list[GolfMessage]:
         """`/wordlebot golf`: the current round live, through today's hole. A player
         yet to share today's puzzle is shown as still to play it, not as missing it."""
         today = today or self.today()
         anchor = self.golf_anchor()
         if anchor is None:
-            return "Golf starts with the first starter the bot posts."
+            return [GolfMessage("Golf starts with the first starter the bot posts.")]
         milestone = golf.progress(anchor, puzzle_number(today, self.launch))
         if milestone is None:
-            return f"Golf round 1 tees off with Wordle {anchor:,}."
-        return "\n".join(self.golf_report(milestone, live=True))
+            return [GolfMessage(f"Golf round 1 tees off with Wordle {anchor:,}.")]
+        return self.golf_report(milestone, live=True)
 
     async def reroll(self, send: Send, actor: Actor | None = None) -> Starter:
         """Replace the upcoming starter and announce it.

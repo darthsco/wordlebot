@@ -8,7 +8,13 @@ What counts as a breaking change: anything that makes an operator or player chan
 
 ### Changed
 
+- Golf: the hole-by-hole scorecard in golf posts and `/wordlebot golf` is now an image, drawn like the admin panel's card: front nine above back nine, birdies and eagles circled, bogeys boxed, aces in gold and failed holes in red. The leaderboard stays as text above it. `[golf] card_max_players` now caps the players on the image.
+- Requires Pillow (new dependency), for the scorecard image.
 - Golf: `/wordlebot golf` and the admin panel's current round are live, through today's hole instead of yesterday's. A player who hasn't shared today's puzzle yet shows `·` for it, which adds nothing to their score until they play. Players are ranked by score to par, so those mid-hole are compared fairly. The scheduled front-nine and final posts are unchanged.
+
+### Fixed
+
+- Admin panel: the golf legend says "Double bogey", not "Double bogey or worse" (a fail has its own mark).
 
 ## [0.5.0] - 2026-11-19
 

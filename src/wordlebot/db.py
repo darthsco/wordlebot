@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS golf_post_messages (
     seq           INTEGER NOT NULL,
     message_id    INTEGER NOT NULL,
     text          TEXT NOT NULL,
+    image_sha     TEXT,             -- sha256 of the attached card image; NULL if none
     PRIMARY KEY (first_puzzle, holes, seq)
 );
 
@@ -260,6 +261,7 @@ class Database:
         if upgrading:
             self._backfill_daily_posts(schedule or ScheduleConfig())
         self._add_score_message_columns()
+        self._add_golf_image_column()
         self._drop_admin_passwords()
 
     def _has_table(self, name: str) -> bool:
@@ -299,6 +301,14 @@ class Database:
             for column in ("channel_id", "message_id"):
                 if column not in columns:
                     self.conn.execute(f"ALTER TABLE scores ADD COLUMN {column} INTEGER")
+
+    def _add_golf_image_column(self) -> None:
+        """Migrate `golf_post_messages` from before golf posts attached a card image.
+        Existing rows (text cards) get NULL: they had no image."""
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(golf_post_messages)")}
+        if "image_sha" not in columns:
+            with self.conn:
+                self.conn.execute("ALTER TABLE golf_post_messages ADD COLUMN image_sha TEXT")
 
     def _drop_admin_passwords(self) -> None:
         """Migrate `admins` from password + TOTP sign-in to passkeys.
@@ -504,10 +514,11 @@ class Database:
         return row[0] if row else None
 
     def mark_golf_posted(
-        self, first_puzzle: int, holes: int, messages: list[tuple[int, str]]
+        self, first_puzzle: int, holes: int, messages: list[tuple[int, str, str | None]]
     ) -> None:
-        """Record a golf post as sent, as `messages` of (message id, text). Called
-        again for a correction or an edit, it replaces the stored messages."""
+        """Record a golf post as sent, as `messages` of (message id, text, sha256 of
+        its image or None). Called again for a correction or an edit, it replaces
+        the stored messages."""
         with self.conn:
             self.conn.execute(
                 "INSERT OR IGNORE INTO golf_posts VALUES (?, ?, ?)", (first_puzzle, holes, _now())
@@ -517,8 +528,11 @@ class Database:
                 (first_puzzle, holes),
             )
             self.conn.executemany(
-                "INSERT INTO golf_post_messages VALUES (?, ?, ?, ?, ?)",
-                [(first_puzzle, holes, i, mid, text) for i, (mid, text) in enumerate(messages)],
+                "INSERT INTO golf_post_messages VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (first_puzzle, holes, i, mid, text, sha)
+                    for i, (mid, text, sha) in enumerate(messages)
+                ],
             )
 
     def golf_posted(self, first_puzzle: int, holes: int) -> bool:
@@ -543,13 +557,16 @@ class Database:
         )
         return [(r[0], r[1]) for r in rows]
 
-    def golf_post_messages(self, first_puzzle: int, holes: int) -> list[tuple[int, str]]:
+    def golf_post_messages(
+        self, first_puzzle: int, holes: int
+    ) -> list[tuple[int, str, str | None]]:
+        """(message id, text, image sha256 or None) of each message of a golf post."""
         rows = self.conn.execute(
-            "SELECT message_id, text FROM golf_post_messages "
+            "SELECT message_id, text, image_sha FROM golf_post_messages "
             "WHERE first_puzzle = ? AND holes = ? ORDER BY seq",
             (first_puzzle, holes),
         )
-        return [(r[0], r[1]) for r in rows]
+        return [(r[0], r[1], r[2]) for r in rows]
 
     # --- scores ----------------------------------------------------------
 

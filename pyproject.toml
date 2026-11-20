@@ -10,6 +10,7 @@ dependencies = [
     "tzdata",  # zoneinfo database for slim container images
     "jinja2>=3.1",  # admin panel templates
     "webauthn>=2.5",  # admin panel passkeys
+    "pillow>=11",  # golf scorecard images
 ]
 
 [project.optional-dependencies]
@@ -26,6 +27,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
+"wordlebot" = ["fonts/*"]
 "wordlebot.web" = ["templates/*.html", "static/*"]
 
 [tool.pytest.ini_options]

@@ -18,7 +18,9 @@ from test_service import (
 from test_solutions import FakeSource
 
 from wordlebot.bot import COMMAND, COMMAND_FAILED, REROLL_IN_PLAY, WordleBot
-from wordlebot.service import REROLL_PREFIX
+from wordlebot.service import REROLL_PREFIX, Attachment, GolfMessage
+
+CARD = Attachment("card.png", b"\x89PNG fake")
 
 
 class Message:
@@ -56,9 +58,11 @@ class DiscordChannel(Channel):
         super().__init__()
         self.shares = {}
         self.allowed = []  # each send's allowed_mentions, or None for the client default
+        self.files = []  # each send's discord.File, or None
 
-    async def send(self, text, allowed_mentions=None):
+    async def send(self, text, allowed_mentions=None, file=None):
         self.allowed.append(allowed_mentions)
+        self.files.append(file)
         return Message(await super().send(text))
 
     def get_partial_message(self, message_id):
@@ -113,11 +117,36 @@ def test_send_pings_only_the_users_asked_for(tmp_path):
     assert allowed.everyone is False and allowed.roles is False
 
 
+def test_an_image_goes_on_the_last_message_of_a_split_send(tmp_path):
+    bot, _, channel = make_bot(tmp_path)
+    asyncio.run(bot._send("\n".join(["x" * 99] * 50), image=CARD))  # three chunks
+    first, second, last = channel.files
+    assert first is None and second is None
+    assert last.filename == "card.png" and last.fp.read() == CARD.data
+
+
+def test_an_edit_replaces_the_attachment_only_when_given_one(tmp_path):
+    bot, _, channel = make_bot(tmp_path)
+    edits = []
+
+    class Posted:
+        async def edit(self, **kwargs):
+            edits.append(kwargs)
+
+    channel.get_partial_message = lambda message_id: Posted()
+    asyncio.run(bot._edit(1, "board"))
+    asyncio.run(bot._edit(1, "board", image=CARD))
+    assert edits[0] == {"content": "board"}
+    [file] = edits[1]["attachments"]
+    assert file.filename == "card.png" and file.fp.read() == CARD.data
+
+
 class Interaction:
     """Enforces Discord's rules: one initial response, followups only after it."""
 
     def __init__(self, user=None):
         self.replies = []
+        self.files = []  # each followup's discord.File, or None
         self.events = []  # "defer", "dm" and "followup", in order
         self.responded = False
         self.response = SimpleNamespace(defer=self._defer, send_message=self._send_message)
@@ -138,23 +167,26 @@ class Interaction:
         self._respond()
         self.replies.append(text)
 
-    async def _followup(self, text, ephemeral=False):
+    async def _followup(self, text, ephemeral=False, file=None):
         assert self.responded, "a followup needs an initial response"
         assert ephemeral
         self.events.append("followup")
         self.replies.append(text)
+        self.files.append(file)
 
 
 class User:
     def __init__(self, interaction, dms_open=True):
         self.interaction, self.dms_open = interaction, dms_open
         self.dms = []
+        self.files = []  # each DM's discord.File, or None
 
-    async def send(self, text):
+    async def send(self, text, file=None):
         if not self.dms_open:
             raise discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "closed")
         self.interaction.events.append("dm")
         self.dms.append(text)
+        self.files.append(file)
 
 
 def subcommand(bot, name):
@@ -387,6 +419,16 @@ def test_closed_dms_fall_back_to_ephemeral_followups(tmp_path):
     interaction = invoke(bot, "history", 100, dms_open=False)
     assert interaction.events == ["defer", "followup", "followup", "followup"]
     assert "".join(interaction.replies) == bot.service.history(100)
+
+
+def test_golf_command_sends_the_card_with_the_board(tmp_path):
+    bot, _, _ = make_bot(tmp_path)
+    bot.service.golf_standings = lambda: [GolfMessage("board 1"), GolfMessage("board 2", CARD)]
+    interaction = invoke(bot, "golf")
+    assert interaction.user.dms == ["board 1", "board 2"]
+    assert interaction.user.files[0] is None and interaction.user.files[1].filename == "card.png"
+    closed = invoke(bot, "golf", dms_open=False)
+    assert closed.replies == ["board 1", "board 2"] and closed.files[1].filename == "card.png"
 
 
 def test_a_failing_command_tells_the_user_and_logs(tmp_path, caplog):

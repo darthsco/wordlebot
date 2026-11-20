@@ -32,7 +32,7 @@ FAILED = "X"
 MISSED = "-"
 YET = "·"  # the live hole, not played yet
 
-# Longest name shown on a card, which is monospace and should fit a phone.
+# Longest name shown on the leaderboard, which is monospace and should fit a phone.
 CARD_NAME_WIDTH = 12
 
 # Each message of a golf post stays under this, below Discord's 2,000 characters
@@ -160,8 +160,8 @@ def format_to_par(value: int) -> str:
 
 
 def _card_name(name: str) -> str:
-    """A name made safe and short for a code block (no markdown applies inside one,
-    but a backtick would end it)."""
+    """A name made safe and short for the leaderboard's code block (no markdown
+    applies inside one, but a backtick would end it)."""
     name = " ".join(name.split()).replace("`", "'")
     if len(name) > CARD_NAME_WIDTH:
         name = name[: CARD_NAME_WIDTH - 1] + "…"
@@ -227,12 +227,13 @@ def stage(milestone: Milestone, live: bool = False) -> str:
 def format_round(
     milestone: Milestone, ranked: list[tuple[int, Player]], max_players: int = 0, live: bool = False
 ) -> list[str]:
-    """The round's leaderboard, then a hole-by-hole card per nine.
+    """The round's leaderboard as text, the part of a golf post that isn't the
+    scorecard image (`golf_card.render`).
 
     Every message is under MESSAGE_LIMIT, so `bot.chunks` never splits a code
-    block: a long board or card continues in another message with its header rows
-    repeated. `max_players` (0 = everyone) caps the players on the cards; everyone
-    is on the leaderboard. `live` as for `card`.
+    block: a long board continues in another message with its header row
+    repeated. `max_players` (0 = everyone) is the number of players on the card
+    image; everyone is on the leaderboard. `live` as for `card`.
     """
     m = milestone
     par = PAR * m.holes
@@ -260,29 +261,9 @@ def format_round(
         board,
         f"{header}\n{label} {names} {result}\n",
     )
-
-    shown = ranked[:max_players] if max_players > 0 else ranked
-    for start in range(0, m.holes, NINE):
-        holes = range(start, min(start + NINE, m.holes))
-        total_label = "OUT" if start == 0 else "IN"
-        head = [
-            f"{'Hole':<{width}} " + "".join(f"{h + 1:>3}" for h in holes) + f" {total_label:>4}",
-            f"{'Par':<{width}} " + "".join(f"{PAR:>3}" for _ in holes) + f" {PAR * len(holes):>4}",
-        ]
-        rows = [
-            f"{_card_name(p.name):<{width}} "
-            + "".join(f"{p.cells[h]:>3}" for h in holes)
-            + f" {p.strokes_in(holes.start, holes.stop):>4}"
-            for _, p in shown
-        ]
-        messages += _blocks(head, rows)
-    notes = []
-    if len(shown) < len(ranked):
-        notes.append(f"Cards show the top {len(shown)} of {len(ranked)}; everyone is on the leaderboard.")
-    if any(MISSED in p.cells or FAILED in p.cells for _, p in shown):
-        notes.append(f"{FAILED} = failed, {MISSED} = not played; both score as a fail.")
-    if any(YET in p.cells for _, p in shown):
-        notes.append(f"{YET} = yet to play today's hole.")
-    if notes:
-        messages[-1] += "\n" + "\n".join(notes)
+    if 0 < max_players < len(ranked):
+        messages[-1] += (
+            f"\nThe card shows the top {max_players} of {len(ranked)}; "
+            "everyone is on the leaderboard."
+        )
     return messages

@@ -52,9 +52,10 @@ class Channel:
     def __init__(self):
         self.sent = []
         self.pinged = {}  # message id -> user ids its mentions may ping
+        self.images = {}  # message id -> the Attachment sent with it
         self.fail = 0
 
-    async def send(self, text, *, ping=()):
+    async def send(self, text, *, ping=(), image=None):
         await asyncio.sleep(0)  # yield, like a real send, so overlapping callers interleave
         if self.fail:
             self.fail -= 1
@@ -62,6 +63,8 @@ class Channel:
         self.sent.append(text)
         if ping:
             self.pinged[len(self.sent)] = list(ping)
+        if image is not None:
+            self.images[len(self.sent)] = image
         return len(self.sent)
 
     def starters(self):

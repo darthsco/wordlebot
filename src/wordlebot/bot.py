@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import io
 import logging
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import asdict
@@ -29,7 +30,7 @@ from discord.ext import tasks
 from .config import Config
 from .scores import MISMATCH, NO_STARTER, PENDING, VERIFIED
 from .db import Starter
-from .service import Actor, PuzzleInPlay, SubmissionsExist, WordleService
+from .service import Actor, Attachment, GolfMessage, PuzzleInPlay, SubmissionsExist, WordleService
 from .version import version_info
 
 log = logging.getLogger(__name__)
@@ -66,6 +67,11 @@ def chunks(text: str, limit: int = DISCORD_LIMIT) -> list[str]:
     if current:
         out.append(current)
     return out
+
+
+def _file(image: Attachment) -> discord.File:
+    """A fresh `discord.File` for `image`: one can be sent only once."""
+    return discord.File(io.BytesIO(image.data), filename=image.filename)
 
 
 class WordleBot(discord.Client):
@@ -117,10 +123,13 @@ class WordleBot(discord.Client):
             channel = await self.fetch_channel(channel_id)
         return channel  # type: ignore[return-value]
 
-    async def _send(self, text: str, *, ping: Collection[int] = ()) -> int:
+    async def _send(
+        self, text: str, *, ping: Collection[int] = (), image: Attachment | None = None
+    ) -> int:
         """Post `text` to the channel, split to fit; returns the last message's id.
 
-        Only the users in `ping` are notified by their mentions.
+        Only the users in `ping` are notified by their mentions. `image` is
+        attached to the last message.
         """
         channel = await self.channel()
         kwargs = {}
@@ -129,14 +138,19 @@ class WordleBot(discord.Client):
             kwargs["allowed_mentions"] = discord.AllowedMentions(
                 everyone=False, roles=False, users=users
             )
-        for part in chunks(text):
+        parts = chunks(text)
+        for i, part in enumerate(parts):
+            if image is not None and i == len(parts) - 1:
+                kwargs["file"] = _file(image)
             message = await channel.send(part, **kwargs)
         return message.id
 
-    async def _edit(self, message_id: int, text: str) -> None:
-        """Replace the text of one of the bot's messages in the channel."""
+    async def _edit(self, message_id: int, text: str, *, image: Attachment | None = None) -> None:
+        """Replace the text of one of the bot's messages in the channel, and its
+        attachments with `image` if given."""
         channel = await self.channel()
-        await channel.get_partial_message(message_id).edit(content=text)  # type: ignore[attr-defined]
+        kwargs = {"attachments": [_file(image)]} if image is not None else {}
+        await channel.get_partial_message(message_id).edit(content=text, **kwargs)  # type: ignore[attr-defined]
 
     # --- posting loop ----------------------------------------------------
 
@@ -191,11 +205,11 @@ class WordleBot(discord.Client):
     # The panel (web.py) calls these, so it takes the same lock and updates the
     # same reactions as the loop and the slash commands.
 
-    async def panel_send(self, text: str) -> int:
-        return await self._send(text)
+    async def panel_send(self, text: str, *, image: Attachment | None = None) -> int:
+        return await self._send(text, image=image)
 
-    async def panel_edit(self, message_id: int, text: str) -> None:
-        await self._edit(message_id, text)
+    async def panel_edit(self, message_id: int, text: str, *, image: Attachment | None = None) -> None:
+        await self._edit(message_id, text, image=image)
 
     async def panel_reroll(self, actor: Actor) -> Starter:
         async with self._post_lock:
@@ -279,13 +293,21 @@ class WordleBot(discord.Client):
 
         The interaction must already be deferred (see `_deferred`).
         """
-        parts = chunks(text)
+        await self._dm_messages(interaction, [GolfMessage(part) for part in chunks(text)])
+
+    async def _dm_messages(
+        self, interaction: discord.Interaction, messages: list[GolfMessage]
+    ) -> None:
+        """`_dm` for messages already split to fit, each with its image if any."""
+        def files(m: GolfMessage) -> dict[str, discord.File]:
+            return {"file": _file(m.image)} if m.image is not None else {}
+
         try:
-            for part in parts:
-                await interaction.user.send(part)
+            for m in messages:
+                await interaction.user.send(m.text, **files(m))
         except discord.Forbidden:
-            for part in parts:
-                await interaction.followup.send(part, ephemeral=True)
+            for m in messages:
+                await interaction.followup.send(m.text, ephemeral=True, **files(m))
             return
         await interaction.followup.send("Sent you a DM. 📬", ephemeral=True)
 
@@ -367,7 +389,7 @@ class WordleBot(discord.Client):
         @self._deferred
         async def golf(interaction: discord.Interaction) -> None:
             await self._refresh_for_report()
-            await self._dm(interaction, service.golf_standings())
+            await self._dm_messages(interaction, service.golf_standings())
 
         @group.command(description="Our recent starting words")
         @app_commands.describe(count="How many to show (default 10)")
