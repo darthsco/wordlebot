@@ -5,6 +5,11 @@ the bot ever picked a starter for): holes 1-9 are the front nine, 10-18 the back
 nine. A hole's strokes are its guesses; a failed hole (X) and a hole the player
 didn't play (or that didn't count, e.g. a mismatched starter) both score
 `fail_score`, so skipping never beats playing.
+
+A round can be shown live, with its last hole being today's puzzle: a player who
+hasn't shared it yet is still to play it, so it adds nothing to their total until
+they do. Players are ranked by score to par, which is the same order as total
+strokes once everyone has the same holes counted.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ HOLES = 2 * NINE
 
 FAILED = "X"
 MISSED = "-"
+YET = "·"  # the live hole, not played yet
 
 # Longest name shown on a card, which is monospace and should fit a phone.
 CARD_NAME_WIDTH = 12
@@ -91,25 +97,34 @@ def latest_milestone(anchor: int, last_played: int) -> Milestone | None:
 class Player:
     user_id: int
     name: str  # raw; escape on the way out
-    cells: tuple[str, ...]  # per hole: guesses, FAILED or MISSED
-    strokes: tuple[int, ...]  # per hole
+    cells: tuple[str, ...]  # per hole: guesses, FAILED, MISSED or YET
+    strokes: tuple[int | None, ...]  # per hole; None = YET, counts nothing so far
+
+    def strokes_in(self, start: int, stop: int) -> int:
+        """Strokes on holes `start`..`stop - 1` (0-based), as a nine's subtotal."""
+        return sum(s for s in self.strokes[start:stop] if s is not None)
 
     @property
     def total(self) -> int:
-        return sum(self.strokes)
+        return self.strokes_in(0, len(self.strokes))
 
     @property
     def to_par(self) -> int:
-        return self.total - PAR * len(self.strokes)
+        return self.total - PAR * sum(s is not None for s in self.strokes)
 
     @property
     def played(self) -> int:
-        return sum(cell != MISSED for cell in self.cells)
+        return sum(cell not in (MISSED, YET) for cell in self.cells)
 
 
-def card(scores: list[Score], milestone: Milestone, fail_score: int) -> list[tuple[int, Player]]:
-    """Everyone with a counted score in the round's holes so far, ranked by total
-    strokes ("1, 2, 2, 4"). `scores` must already be filtered to the ones that count."""
+def card(
+    scores: list[Score], milestone: Milestone, fail_score: int, live: bool = False
+) -> list[tuple[int, Player]]:
+    """Everyone with a counted score in the round's holes so far, ranked by score to
+    par ("1, 2, 2, 4"). `scores` must already be filtered to the ones that count.
+
+    `live`: the milestone's last hole is still in play, so a player without a score
+    for it is YET rather than MISSED."""
     by_user: dict[int, dict[int, Score]] = defaultdict(dict)
     for s in scores:
         if milestone.first <= s.puzzle_number <= milestone.last:
@@ -121,7 +136,10 @@ def card(scores: list[Score], milestone: Milestone, fail_score: int) -> list[tup
         cells, strokes = [], []
         for number in range(milestone.first, milestone.last + 1):
             score = holes.get(number)
-            if score is None:
+            if score is None and live and number == milestone.last:
+                cells.append(YET)
+                strokes.append(None)
+            elif score is None:
                 cells.append(MISSED)
                 strokes.append(fail_score)
             else:
@@ -129,10 +147,10 @@ def card(scores: list[Score], milestone: Milestone, fail_score: int) -> list[tup
                 strokes.append(effective_score(score.guesses, fail_score))
         players.append(Player(user_id, latest.user_name, tuple(cells), tuple(strokes)))
 
-    players.sort(key=lambda p: (p.total, p.name.lower(), p.user_id))
+    players.sort(key=lambda p: (p.to_par, p.name.lower(), p.user_id))
     result: list[tuple[int, Player]] = []
     for position, p in enumerate(players, 1):
-        tied = result and result[-1][1].total == p.total
+        tied = result and result[-1][1].to_par == p.to_par
         result.append((result[-1][0] if tied else position, p))
     return result
 
@@ -157,7 +175,9 @@ def _block(lines: list[str]) -> str:
 def hole_mark(cell: str) -> str:
     """A card cell's score name, as scorecards mark it: "ace" (a hole in one),
     "eagle" or better, "birdie", "par", "bogey", "double" (bogey or worse),
-    "failed" or "missed"."""
+    "failed", "missed" or "yet" (the live hole, not played yet)."""
+    if cell == YET:
+        return "yet"
     if cell == FAILED:
         return "failed"
     if cell == MISSED:
@@ -192,8 +212,11 @@ def _blocks(head: list[str], rows: list[str], first_prefix: str = "") -> list[st
     return messages
 
 
-def stage(milestone: Milestone) -> str:
-    """How far the round has got: "final", "after the front nine" or "through N holes"."""
+def stage(milestone: Milestone, live: bool = False) -> str:
+    """How far the round has got: "final", "after the front nine", "through N holes",
+    or, `live`, "hole N in play"."""
+    if live:
+        return f"hole {milestone.holes} in play"
     if milestone.final:
         return "final"
     if milestone.holes == NINE:
@@ -202,26 +225,26 @@ def stage(milestone: Milestone) -> str:
 
 
 def format_round(
-    milestone: Milestone, ranked: list[tuple[int, Player]], max_players: int = 0
+    milestone: Milestone, ranked: list[tuple[int, Player]], max_players: int = 0, live: bool = False
 ) -> list[str]:
     """The round's leaderboard, then a hole-by-hole card per nine.
 
     Every message is under MESSAGE_LIMIT, so `bot.chunks` never splits a code
     block: a long board or card continues in another message with its header rows
     repeated. `max_players` (0 = everyone) caps the players on the cards; everyone
-    is on the leaderboard.
+    is on the leaderboard. `live` as for `card`.
     """
     m = milestone
     par = PAR * m.holes
     span = f"Wordle {m.first:,}" if m.holes == 1 else f"Wordle {m.first:,}–{m.last:,}"
-    header = f"⛳ **Golf round {m.round_no}, {stage(m)}** ({span}, par {par})"
+    header = f"⛳ **Golf round {m.round_no}, {stage(m, live)}** ({span}, par {par})"
     if not ranked:
         return [f"{header}\nNo scores this round."]
 
     leaders = [p for rank, p in ranked if rank == 1]
     names = ", ".join(f"**{escape_name(p.name)}**" for p in leaders)
     result = f"({format_to_par(leaders[0].to_par)}, {leaders[0].total})"
-    if m.final:
+    if m.final and not live:
         label = "🏆 Winner:" if len(leaders) == 1 else "🏆 Co-champions:"
     else:
         label = "Leader:" if len(leaders) == 1 else "Leaders:"
@@ -249,7 +272,7 @@ def format_round(
         rows = [
             f"{_card_name(p.name):<{width}} "
             + "".join(f"{p.cells[h]:>3}" for h in holes)
-            + f" {sum(p.strokes[h] for h in holes):>4}"
+            + f" {p.strokes_in(holes.start, holes.stop):>4}"
             for _, p in shown
         ]
         messages += _blocks(head, rows)
@@ -258,6 +281,8 @@ def format_round(
         notes.append(f"Cards show the top {len(shown)} of {len(ranked)}; everyone is on the leaderboard.")
     if any(MISSED in p.cells or FAILED in p.cells for _, p in shown):
         notes.append(f"{FAILED} = failed, {MISSED} = not played; both score as a fail.")
+    if any(YET in p.cells for _, p in shown):
+        notes.append(f"{YET} = yet to play today's hole.")
     if notes:
         messages[-1] += "\n" + "\n".join(notes)
     return messages

@@ -483,10 +483,12 @@ def test_golf_tab_shows_the_current_round_then_earlier_ones(tmp_path):
         current, earlier = text.split("Round 1 <span")
         # Every card has all 18 holes; the current one shades the holes still to come.
         assert current.count('<th scope="col">') == earlier.count('<th scope="col">') == 18
-        assert current.count('<td class="future">') == 13 and "future" not in earlier
+        assert current.count('<td class="future">') == 12 and "future" not in earlier
         assert '<details open>' in current and '<details open>' not in earlier
         assert '<span class="mark eagle" title="eagle">2</span>' in current  # Bob's hole 1
         assert current.count('<span class="mark missed"') == 4
+        assert current.count('<span class="mark yet"') == 1  # hole 6 is today's
+        assert "hole 6 in play" in current
         assert '<td class="sum">30</td>' in current  # Out: 2 + 4 missed at 7
         assert '<span class="mark birdie" title="birdie">3</span>' in earlier  # Ada's hole 1
 

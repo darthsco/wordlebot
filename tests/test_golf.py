@@ -64,6 +64,27 @@ def test_card_ignores_scores_outside_the_round_so_far():
     assert [p.user_id for _, p in ranked] == [2]
 
 
+def test_a_live_hole_not_yet_played_counts_nothing():
+    m = Milestone(1, 100, 3)
+    ranked = card([score(100, 1, 3), score(102, 2, 4)], m, fail_score=7, live=True)
+    player = {p.user_id: p for _, p in ranked}
+    assert player[1].cells == ("3", "-", golf.YET)
+    assert player[1].strokes == (3, 7, None)
+    assert (player[1].total, player[1].to_par, player[1].played) == (10, 2, 1)
+    assert player[2].cells == ("-", "-", "4")
+    assert (player[2].total, player[2].to_par) == (18, 6)
+
+
+def test_live_card_ranks_by_score_to_par():
+    """Mid-hole, fewer strokes over fewer holes isn't a better round."""
+    m = Milestone(1, 100, 2)
+    scores = [score(100, 1, 3), score(101, 1, 4), score(100, 2, 4)]
+    ranked = card(scores, m, 7, live=True)
+    assert [(r, p.user_id, p.total) for r, p in ranked] == [(1, 1, 7), (2, 2, 4)]
+    tied = card(scores + [score(100, 3, 3)], m, 7, live=True)
+    assert [(r, p.user_id) for r, p in tied] == [(1, 1), (1, 3), (3, 2)]
+
+
 def test_ties_share_a_rank():
     m = Milestone(1, 100, 1)
     ranked = card([score(100, 1, 3), score(100, 2, 3), score(100, 3, 5)], m, 7)
@@ -126,8 +147,21 @@ def test_long_names_are_truncated_on_the_card():
 
 
 def test_hole_marks_follow_scorecard_names():
-    marks = [golf.hole_mark(c) for c in ["1", "2", "3", "4", "5", "6", "7", golf.FAILED, golf.MISSED]]
-    assert marks == ["ace", "eagle", "birdie", "par", "bogey", "double", "double", "failed", "missed"]
+    cells = ["1", "2", "3", "4", "5", "6", "7", golf.FAILED, golf.MISSED, golf.YET]
+    marks = [golf.hole_mark(c) for c in cells]
+    assert marks == [
+        "ace", "eagle", "birdie", "par", "bogey", "double", "double", "failed", "missed", "yet"
+    ]
+
+
+def test_a_live_round_is_never_final_and_explains_the_live_hole():
+    m = Milestone(1, 100, 18)
+    scores = [score(n, 1, 4) for n in range(100, 117)]
+    messages = format_round(m, card(scores, m, 7, live=True), live=True)
+    assert "Golf round 1, hole 18 in play" in messages[0]
+    assert "Leader: **user1** (E, 68)" in messages[0] and "🏆" not in messages[0]
+    assert messages[2].rstrip().endswith(f"{golf.YET} = yet to play today's hole.")
+    assert f"  {golf.YET}   32" in messages[2]  # In: 8 holes of 4, the live one counts nothing
 
 
 def test_empty_round():
@@ -268,25 +302,31 @@ def test_nothing_is_owed_without_a_starter(tmp_path):
     assert "first starter" in service.golf_standings()
 
 
-def test_golf_command_shows_the_round_through_yesterday(tmp_path):
+def test_golf_command_shows_the_round_live_through_today(tmp_path):
     service, clock, _ = make(tmp_path)
-    assert "tees off with Wordle 12" in service.golf_standings(TODAY)
+    assert "tees off with Wordle 12" in service.golf_standings(TODAY - timedelta(days=1))
+    assert "No scores this round." in service.golf_standings(TODAY)
     service.db.add_score(score(ANCHOR, 1, 3))
-    service.db.add_score(score(ANCHOR + 1, 1, 4))  # today's hole is still in play
+    service.db.add_score(score(ANCHOR, 2, 5))
+    service.db.add_score(score(ANCHOR + 1, 2, 4))  # today's hole: user2 has played it
     text = service.golf_standings(puzzle_date(ANCHOR + 1, LAUNCH))
-    assert "through 1 hole**" in text and "par 4)" in text
+    assert "Golf round 1, hole 2 in play** (Wordle 12–13, par 8)" in text
+    assert "Leader: **user1** (-1, 3)" in text  # yet to play hole 2, so not +2 behind
+    assert f"user1   3  {golf.YET}    3" in text
     text = service.golf_standings(ROUND_DONE)
-    assert "Golf round 1, final" in text
+    assert "Golf round 2, hole 1 in play" in text
 
 
 def test_golf_rounds_lists_the_current_round_then_earlier_ones_newest_first(tmp_path):
     service, _, _ = make(tmp_path)
-    assert service.golf_rounds(TODAY) == []  # hole 1 isn't over yet
+    assert service.golf_rounds(TODAY - timedelta(days=1)) == []  # before hole 1
+    assert service.golf_rounds(TODAY) == [(Milestone(1, ANCHOR, 1), [])]
     service.db.add_score(score(ANCHOR, 1, 3))
     service.db.add_score(score(ANCHOR + 18, 2, 2))
-    service.db.add_score(score(ANCHOR + 37, 3, 2))  # round 3, after yesterday
+    service.db.add_score(score(ANCHOR + 37, 3, 2))  # round 3, after today
     rounds = service.golf_rounds(ROUND_DONE + timedelta(days=5))
-    assert [m for m, _ in rounds] == [Milestone(2, ANCHOR + 18, 5), FINAL]
+    assert [m for m, _ in rounds] == [Milestone(2, ANCHOR + 18, 6), FINAL]
+    assert rounds[0][1][0][1].cells[-1] == golf.YET
     assert [p.user_id for _, p in rounds[0][1]] == [2]
     assert [p.user_id for _, p in rounds[1][1]] == [1]
 

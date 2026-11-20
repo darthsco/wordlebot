@@ -510,11 +510,12 @@ class WordleService:
             done = [m for m in done if m.last > first + holes - 1]  # never go back
         return done
 
-    def golf_report(self, milestone: golf.Milestone) -> list[str]:
-        """The round's leaderboard and cards as of `milestone`, one message each."""
+    def golf_report(self, milestone: golf.Milestone, live: bool = False) -> list[str]:
+        """The round's leaderboard and cards as of `milestone`, one message each.
+        `live`: its last hole is today's, still in play (see `golf.card`)."""
         scores = self._counted(milestone.first, milestone.last)
-        ranked = golf.card(scores, milestone, self.config.game.fail_score)
-        return golf.format_round(milestone, ranked, self.config.golf.card_max_players)
+        ranked = golf.card(scores, milestone, self.config.game.fail_score, live)
+        return golf.format_round(milestone, ranked, self.config.golf.card_max_players, live)
 
     async def _post_golf(self, milestone: golf.Milestone, send: Send, prefix: str = "") -> None:
         report = self.golf_report(milestone)
@@ -598,35 +599,36 @@ class WordleService:
         self, today: date | None = None
     ) -> list[tuple[golf.Milestone, list[tuple[int, golf.Player]]]]:
         """Every round so far with its full leaderboard, newest first: the current
-        one through yesterday's puzzle (as `/wordlebot golf` shows it), then each earlier
-        round, complete. Empty until the first hole is over."""
+        one live through today's hole (as `/wordlebot golf` shows it), then each
+        earlier round, complete. Empty until the first hole is in play."""
         today = today or self.today()
         anchor = self.golf_anchor()
         if anchor is None:
             return []
-        current = golf.progress(anchor, puzzle_number(today - timedelta(days=1), self.launch))
+        current = golf.progress(anchor, puzzle_number(today, self.launch))
         if current is None:
             return []
         scores = self._counted(anchor, current.last)
         fail_score = self.config.game.fail_score
-        rounds = [current] + [
+        earlier = [
             golf.Milestone(n, anchor + (n - 1) * golf.HOLES, golf.HOLES)
             for n in range(current.round_no - 1, 0, -1)
         ]
-        return [(m, golf.card(scores, m, fail_score)) for m in rounds]
+        return [(current, golf.card(scores, current, fail_score, live=True))] + [
+            (m, golf.card(scores, m, fail_score)) for m in earlier
+        ]
 
     def golf_standings(self, today: date | None = None) -> str:
-        """`/wordlebot golf`: the current round through the last puzzle that is over everywhere
-        (yesterday's), or the round that just ended."""
+        """`/wordlebot golf`: the current round live, through today's hole. A player
+        yet to share today's puzzle is shown as still to play it, not as missing it."""
         today = today or self.today()
         anchor = self.golf_anchor()
         if anchor is None:
             return "Golf starts with the first starter the bot posts."
-        yesterday = puzzle_number(today - timedelta(days=1), self.launch)
-        milestone = golf.progress(anchor, yesterday)
+        milestone = golf.progress(anchor, puzzle_number(today, self.launch))
         if milestone is None:
-            return f"Golf round 1 tees off with Wordle {anchor:,}; check back the day after."
-        return "\n".join(self.golf_report(milestone))
+            return f"Golf round 1 tees off with Wordle {anchor:,}."
+        return "\n".join(self.golf_report(milestone, live=True))
 
     async def reroll(self, send: Send, actor: Actor | None = None) -> Starter:
         """Replace the upcoming starter and announce it.

@@ -111,6 +111,6 @@ table.scorecard { border-collapse: collapse; width: 100%; font-variant-numeric: 
 .mark.bogey { border: 1.5px solid var(--over); color: var(--over); }
 .mark.double { border: 4px double var(--over); color: var(--over); }
 .mark.failed { border-radius: 4px; background: var(--fail-bg); color: var(--bad); font-weight: 700; }
-.mark.missed { color: var(--muted); }
+.mark.missed, .mark.yet { color: var(--muted); }
 ul.legend { list-style: none; display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 0; margin: 4px 0 8px; font-size: 0.9em; }
 ul.legend li { display: flex; align-items: center; gap: 6px; }

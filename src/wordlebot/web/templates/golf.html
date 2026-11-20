@@ -5,12 +5,13 @@
 {% block content %}
 <h1>⛳ Golf</h1>
 {% if not rounds %}
-<p class="muted">{% if anchor is none %}Golf starts with the first starter the bot posts.{% else %}Round 1 tees off with Wordle {{ "{:,}".format(anchor) }}; standings appear the day after.{% endif %}</p>
+<p class="muted">{% if anchor is none %}Golf starts with the first starter the bot posts.{% else %}Round 1 tees off with Wordle {{ "{:,}".format(anchor) }}.{% endif %}</p>
 {% endif %}
 {% for m, ranked in rounds %}
+{% set live = loop.first %}
 <section class="card golf-round">
-<h2>Round {{ m.round_no }} <span class="stage{% if m.final %} final{% endif %}">{{ stage(m) }}</span>{% if loop.first and not m.final %} <span class="stage current">current</span>{% endif %}</h2>
-<p class="muted">Wordle {{ "{:,}".format(m.first) }}–{{ "{:,}".format(m.first + holes - 1) }} · par {{ par * holes }}{% if loop.first and not m.final %} · {{ m.holes }} of {{ holes }} holes played, through yesterday's puzzle{% endif %}</p>
+<h2>Round {{ m.round_no }} <span class="stage{% if m.final and not live %} final{% endif %}">{{ stage(m, live) }}</span>{% if live %} <span class="stage current">current</span>{% endif %}</h2>
+<p class="muted">Wordle {{ "{:,}".format(m.first) }}–{{ "{:,}".format(m.first + holes - 1) }} · par {{ par * holes }}{% if live %} · hole {{ m.holes }} of {{ holes }} is today's puzzle, still in play{% endif %}</p>
 {% if ranked %}
 <div class="table-wrap">
 <table class="golf-board">
@@ -18,7 +19,7 @@
   <tbody>
   {% for rank, p in ranked %}
   <tr{% if rank == 1 %} class="leader"{% endif %}>
-    <td>{{ position(rank, ranked) }}{% if rank == 1 %} {{ "🏆" if m.final else "⛳" }}{% endif %}</td>
+    <td>{{ position(rank, ranked) }}{% if rank == 1 %} {{ "🏆" if m.final and not live else "⛳" }}{% endif %}</td>
     <td><a href="/scores?user={{ p.user_id }}">{{ p.name }}</a></td>
     <td class="num">{{ p.total }}</td>
     <td class="num">{{ to_par_cell(p.to_par) }}</td>
@@ -53,9 +54,9 @@
     <th class="name" scope="row"><span class="pos">{{ position(rank, ranked) }}</span> {{ p.name }}</th>
     {% for h in range(holes) %}
     {% if h < m.holes %}<td><span class="mark {{ mark(p.cells[h]) }}" title="{{ mark(p.cells[h]) }}">{{ p.cells[h] }}</span></td>{% else %}<td class="future"></td>{% endif %}
-    {% if h + 1 == nine %}<td class="sum">{{ p.strokes[:nine] | sum }}</td>{% endif %}
+    {% if h + 1 == nine %}<td class="sum">{{ p.strokes_in(0, nine) }}</td>{% endif %}
     {% endfor %}
-    <td class="sum">{% if m.holes > nine %}{{ p.strokes[nine:] | sum }}{% endif %}</td>
+    <td class="sum">{% if m.holes > nine %}{{ p.strokes_in(nine, holes) }}{% endif %}</td>
     <td class="sum total">{{ p.total }}</td>
     <td class="sum">{{ to_par_cell(p.to_par) }}</td>
   </tr>
@@ -79,7 +80,8 @@
   <li><span class="mark double">6</span> Double bogey or worse</li>
   <li><span class="mark failed">X</span> Failed</li>
   <li><span class="mark missed">-</span> Not played</li>
+  <li><span class="mark yet">·</span> Yet to play today's hole</li>
 </ul>
-<p class="muted">A failed or unplayed hole scores {{ fail_score }}. Totals count holes played so far.</p>
+<p class="muted">A failed or unplayed hole scores {{ fail_score }}. Today's hole counts once it's played; players are ranked by score to par.</p>
 {% endif %}
 {% endblock %}
