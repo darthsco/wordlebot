@@ -223,3 +223,19 @@ def test_overrides_layer_over_the_file_and_are_validated():
 def test_web_host_can_be_set_from_the_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("WORDLEBOT_WEB_HOST", "0.0.0.0")
     assert load_config(tmp_path / "nope.toml").web.host == "0.0.0.0"
+
+
+def test_web_domain_is_a_bare_host_name_and_needed_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.delenv("WORDLEBOT_WEB_DOMAIN", raising=False)
+    config = tmp_path / "config.toml"
+    config.write_text("[web]\nenabled = true\n")
+    with pytest.raises(ValueError, match=r"\[web\] domain must be set when the panel is enabled"):
+        load_config(config)
+    for bad in ("https://panel.example.com", "panel.example.com:443", "Panel.Example.com", "panel.example.com."):
+        config.write_text(f'[web]\ndomain = "{bad}"\n')
+        with pytest.raises(ValueError, match=r"\[web\] domain must be the panel's host name"):
+            load_config(config)
+    config.write_text('[web]\nenabled = true\ndomain = "wordlebot.example.com"\n')
+    assert load_config(config).web.domain == "wordlebot.example.com"
+    monkeypatch.setenv("WORDLEBOT_WEB_DOMAIN", "localhost")
+    assert load_config(config).web.domain == "localhost"

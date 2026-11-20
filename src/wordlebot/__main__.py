@@ -5,14 +5,13 @@ Commands:
   sync            refresh the solution cache and exit
   pick            print the starter that would be chosen for the next target date (dry run)
   admin ACTION    manage admin panel accounts:
-                    list | add NAME | passwd NAME | reset-2fa NAME | remove NAME
+                    list | add NAME | enroll NAME | reset-passkeys NAME | remove NAME
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import getpass
 import logging
 import os
 import sys
@@ -79,38 +78,48 @@ async def _start_panel(
 
     auth = Auth(db, config.web)
     auth.prune_sessions()
+    log = logging.getLogger("wordlebot")
     if not db.admin_names():
-        logging.getLogger("wordlebot").warning(
+        log.warning(
             "The admin panel is enabled but has no admins; add one with `python -m wordlebot admin add NAME`"
         )
+    for name in db.admin_names():
+        if not db.passkeys(name):
+            log.warning(
+                "Admin %s has no passkey and can't sign in; make them a link with "
+                "`python -m wordlebot admin enroll %s`", name, name,
+            )
     return await panel.start(panel.Panel(service, auth, bot), config.web.host, config.web.port)
 
 
-def _ask_password() -> str:
-    from .auth import password_problem
+ADMIN_ACTIONS = ["list", "add", "enroll", "reset-passkeys", "remove"]
 
-    while True:
-        password = getpass.getpass("Password: ")
-        if problem := password_problem(password):
-            print(problem, file=sys.stderr)
-            continue
-        if getpass.getpass("Repeat: ") != password:
-            print("The passwords don't match.", file=sys.stderr)
-            continue
-        return password
+
+def _print_enrollment(config: Config, db: Database, username: str) -> None:
+    from .auth import ENROLLMENT_LIFETIME, Auth
+
+    token = Auth(db, config.web).issue_enrollment(username)
+    hours = int(ENROLLMENT_LIFETIME.total_seconds() // 3600)
+    if config.web.domain:
+        link = f"https://{config.web.domain}/enroll/{token}"
+    else:
+        link = f"/enroll/{token}  (after the panel's https:// address; [web] domain is not set)"
+    print(f"Enrollment link for {username} (works once, for {hours} hours; replaces any earlier link):")
+    print(f"  {link}")
+    print("Send it privately: whoever opens it first registers a passkey for this account.")
 
 
 def _admin(config: Config, action: str, username: str | None) -> int:
-    """Manage panel accounts from the host; the only way to create the first admin
-    or recover one who lost their authenticator."""
-    from .auth import hash_password, valid_username
+    """Manage panel accounts from the host; the only way to create an admin or let
+    one who lost every passkey back in."""
+    from .auth import valid_username
 
     db = Database(config.storage.database_path, config.schedule)
     try:
         if action == "list":
             for name in db.admin_names():
-                admin = db.admin(name)
-                print(f"{name}{'' if admin and admin.totp_enabled else '  (two-factor not set up yet)'}")
+                count = len(db.passkeys(name))
+                print(f"{name}  ({count} passkey{'' if count == 1 else 's'})" if count else f"{name}  (no passkey yet)")
             return 0
         if not username:
             print(f"admin {action} needs a username", file=sys.stderr)
@@ -119,26 +128,25 @@ def _admin(config: Config, action: str, username: str | None) -> int:
             if not valid_username(username):
                 print("Usernames are 1-64 printable characters without surrounding spaces.", file=sys.stderr)
                 return 2
-            if db.admin(username):
+            if not db.add_admin(username):
                 print(f"{username} already exists.", file=sys.stderr)
                 return 1
-            db.add_admin(username, hash_password(_ask_password()))
             db.audit("cli", "admin_added", username)
-            print(f"Added {username}. They set up two-factor sign-in at their first login.")
+            print(f"Added {username}.")
+            _print_enrollment(config, db, username)
             return 0
         if db.admin(username) is None:
             print(f"No admin named {username}.", file=sys.stderr)
             return 1
-        if action == "passwd":
-            db.set_admin_password(username, hash_password(_ask_password()))
+        if action == "enroll":
+            db.audit("cli", "enrollment_link", username)
+            _print_enrollment(config, db, username)
+        elif action == "reset-passkeys":
+            removed = db.remove_passkeys(username)
             db.delete_sessions(username)
-            db.audit("cli", "password_reset", username)
-            print(f"Password changed; {username}'s sessions were ended.")
-        elif action == "reset-2fa":
-            db.set_admin_totp(username, None, enabled=False)
-            db.delete_sessions(username)
-            db.audit("cli", "totp_reset", username)
-            print(f"Two-factor reset; {username} sets it up again at their next login.")
+            db.audit("cli", "passkeys_reset", f"{username}: {removed} removed")
+            print(f"Removed {removed} passkey(s) and ended {username}'s sessions.")
+            _print_enrollment(config, db, username)
         elif action == "remove":
             db.remove_admin(username)
             db.audit("cli", "admin_removed", username)
@@ -152,7 +160,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="wordlebot")
     parser.add_argument("--config", default=os.environ.get("WORDLEBOT_CONFIG", "config.toml"))
     parser.add_argument("command", nargs="?", default="run", choices=["run", "sync", "pick", "admin"])
-    parser.add_argument("action", nargs="?", choices=["list", "add", "passwd", "reset-2fa", "remove"])
+    parser.add_argument("action", nargs="?", choices=ADMIN_ACTIONS)
     parser.add_argument("username", nargs="?")
     load_dotenv()
     args = parser.parse_args()
@@ -165,7 +173,7 @@ def main() -> None:
         raise SystemExit(f"{args.config}: {exc}") from None
     if args.command == "admin":
         if args.action is None:
-            parser.error("admin needs an action: list, add, passwd, reset-2fa or remove")
+            parser.error(f"admin needs an action: {', '.join(ADMIN_ACTIONS)}")
         raise SystemExit(_admin(config, args.action, args.username))
     if args.action is not None:
         parser.error(f"unexpected argument {args.action!r}")

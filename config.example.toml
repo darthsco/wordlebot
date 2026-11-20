@@ -74,8 +74,13 @@ fetch_concurrency = 8      # parallel requests during backfill; at least 1
 [web]
 # Admin panel: a web app served by the bot, reached over HTTPS through the Caddy
 # reverse proxy in compose.yaml (see README). Plain HTTP requests that didn't come
-# through the proxy are refused. Create an admin with `python -m wordlebot admin add NAME`.
+# through the proxy are refused. Create an admin with `python -m wordlebot admin add NAME`,
+# which prints a one-time link for registering their passkey.
 enabled = false
+# The panel's host name, as in its https:// address (no scheme or port). Passkeys
+# are tied to it, so changing it later means every admin enrolls again. Needed when
+# enabled; the Docker setup fills it from PANEL_DOMAIN (WORDLEBOT_WEB_DOMAIN).
+domain = ""
 host = "127.0.0.1"        # listen address; the Docker image overrides it (WORDLEBOT_WEB_HOST)
 port = 8080               # 1 to 65535; never publish it, only the proxy should reach it
 session_hours = 12        # a login lasts at most this long (at least 1)

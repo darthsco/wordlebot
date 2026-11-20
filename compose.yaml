@@ -13,6 +13,9 @@ services:
     # The image declares STOPSIGNAL SIGINT too; this keeps it explicit.
     stop_signal: SIGINT
     env_file: .env
+    environment:
+      # The admin panel's passkeys are tied to its domain (Caddy serves the same one).
+      WORDLEBOT_WEB_DOMAIN: ${PANEL_DOMAIN:-localhost}
     volumes:
       # Long syntax so a missing config.toml is an error instead of Docker
       # creating a root-owned directory at that path.

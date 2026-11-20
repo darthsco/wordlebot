@@ -90,6 +90,7 @@ class SolutionsConfig:
 @dataclass(frozen=True)
 class WebConfig:
     enabled: bool = False
+    domain: str = ""
     host: str = "127.0.0.1"
     port: int = 8080
     session_hours: int = 12
@@ -184,6 +185,8 @@ def load_config(path: str | Path = "config.toml", *, for_run: bool = False) -> C
         sections["storage"] = replace(sections["storage"], database_path=db_path)
     if web_host := os.environ.get("WORDLEBOT_WEB_HOST"):
         sections["web"] = replace(sections["web"], host=web_host)
+    if web_domain := os.environ.get("WORDLEBOT_WEB_DOMAIN"):
+        sections["web"] = replace(sections["web"], domain=web_domain)
 
     config = Config(**sections, token=os.environ.get("DISCORD_TOKEN", ""))
     validate(config, for_run=for_run)
@@ -213,6 +216,14 @@ def _is_timezone(value: str) -> bool:
     except (KeyError, ValueError, OSError):  # ZoneInfoNotFoundError is a KeyError
         return False
     return True
+
+
+_HOSTNAME = re.compile(r"(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*")
+
+
+def _is_domain(value: str) -> bool:
+    """Empty, or a lowercase host name: no scheme, port, path or trailing dot."""
+    return value == "" or _HOSTNAME.fullmatch(value) is not None
 
 
 def _is_iso_date(value: str) -> bool:
@@ -271,6 +282,7 @@ _RULES: dict[str, dict[str, Rule]] = {
         "fetch_concurrency": _at_least(1),
     },
     "web": {
+        "domain": (_is_domain, "must be the panel's host name, e.g. \"wordlebot.example.com\""),
         "host": _NON_EMPTY,
         "port": (lambda v: 1 <= v <= 65535, "must be between 1 and 65535"),
         "session_hours": _at_least(1),
@@ -349,6 +361,9 @@ def validate(config: Config, *, for_run: bool = False) -> None:
         errors.append(
             f"[game] fail_score must be greater than max_guesses ({game.max_guesses}), got {game.fail_score}"
         )
+
+    if {"enabled", "domain"} <= typed["web"] and config.web.enabled and not config.web.domain:
+        errors.append("[web] domain must be set when the panel is enabled (passkeys are tied to it)")
 
     if for_run:
         for key in ("guild_id", "channel_id"):

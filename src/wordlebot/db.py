@@ -6,7 +6,9 @@ Queries are small and fast, so this uses the synchronous stdlib driver directly.
 
 from __future__ import annotations
 
+import base64
 import json
+import secrets
 import sqlite3
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -79,22 +81,39 @@ CREATE TABLE IF NOT EXISTS scores (
 );
 CREATE INDEX IF NOT EXISTS scores_status ON scores(status);
 
--- Admin panel. Passwords are scrypt hashes (see auth.py); the TOTP secret is
--- set at first login and confirmed by a code before it is enabled.
+-- Admin panel. Admins sign in with passkeys (see auth.py). `user_handle` is the
+-- random WebAuthn user id their passkeys are registered under, never the username.
 CREATE TABLE IF NOT EXISTS admins (
     username      TEXT PRIMARY KEY,
-    password_hash TEXT NOT NULL,
-    totp_secret   TEXT,
-    totp_enabled  INTEGER NOT NULL DEFAULT 0,
-    totp_last_step INTEGER,         -- the last accepted code's time step, against replay
+    user_handle   TEXT NOT NULL UNIQUE, -- base64url
     created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS passkeys (
+    credential_id TEXT PRIMARY KEY, -- base64url
+    username      TEXT NOT NULL,
+    public_key    BLOB NOT NULL,    -- COSE key
+    sign_count    INTEGER NOT NULL,
+    transports    TEXT NOT NULL,    -- JSON list, a hint for the browser
+    label         TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    last_used_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS passkeys_username ON passkeys(username);
+
+-- One-time links, made by the CLI, that let an admin register a passkey without
+-- signing in. Only a hash of the token is stored.
+CREATE TABLE IF NOT EXISTS enrollment_tokens (
+    token_hash    TEXT PRIMARY KEY,
+    username      TEXT NOT NULL,
+    expires_at    TEXT NOT NULL
 );
 
 -- Only a hash of the session token is stored, so a copy of the database can't log in.
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash    TEXT PRIMARY KEY,
     username      TEXT NOT NULL,
-    stage         TEXT NOT NULL,    -- totp | enroll | full
+    stage         TEXT NOT NULL,    -- always "full" (partial stages ended with passwords)
     csrf_token    TEXT NOT NULL,
     created_at    TEXT NOT NULL,
     last_seen_at  TEXT NOT NULL
@@ -179,10 +198,19 @@ class Score:
 @dataclass(frozen=True)
 class Admin:
     username: str
-    password_hash: str
-    totp_secret: str | None
-    totp_enabled: bool
-    totp_last_step: int | None
+    user_handle: str  # base64url WebAuthn user id
+
+
+@dataclass(frozen=True)
+class Passkey:
+    credential_id: str  # base64url
+    username: str
+    public_key: bytes
+    sign_count: int
+    transports: tuple[str, ...]
+    label: str
+    created_at: str
+    last_used_at: str | None
 
 
 @dataclass(frozen=True)
@@ -214,6 +242,10 @@ class DeletedScore:
     reason: str
 
 
+def new_user_handle() -> str:
+    return base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -228,6 +260,7 @@ class Database:
         if upgrading:
             self._backfill_daily_posts(schedule or ScheduleConfig())
         self._add_score_message_columns()
+        self._drop_admin_passwords()
 
     def _has_table(self, name: str) -> bool:
         row = self.conn.execute(
@@ -266,6 +299,30 @@ class Database:
             for column in ("channel_id", "message_id"):
                 if column not in columns:
                     self.conn.execute(f"ALTER TABLE scores ADD COLUMN {column} INTEGER")
+
+    def _drop_admin_passwords(self) -> None:
+        """Migrate `admins` from password + TOTP sign-in to passkeys.
+
+        Admins are kept with a new user handle and no passkeys, so each needs an
+        enrollment link (`admin enroll NAME`). Signed-in sessions stay valid;
+        half-finished logins (waiting for a code) are dropped.
+        """
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(admins)")}
+        if "password_hash" not in columns:
+            return
+        rows = self.conn.execute("SELECT username, created_at FROM admins").fetchall()
+        with self.conn:
+            self.conn.execute("ALTER TABLE admins RENAME TO admins_password_era")
+            self.conn.execute(
+                "CREATE TABLE admins (username TEXT PRIMARY KEY, "
+                "user_handle TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL)"
+            )
+            self.conn.executemany(
+                "INSERT INTO admins VALUES (?, ?, ?)",
+                [(r["username"], new_user_handle(), r["created_at"]) for r in rows],
+            )
+            self.conn.execute("DROP TABLE admins_password_era")
+            self.conn.execute("DELETE FROM sessions WHERE stage != 'full'")
 
     def close(self) -> None:
         self.conn.close()
@@ -629,57 +686,106 @@ class Database:
 
     # --- admin panel: accounts and sessions -------------------------------
 
-    def add_admin(self, username: str, password_hash: str) -> bool:
+    def add_admin(self, username: str) -> bool:
         with self.conn:
             cur = self.conn.execute(
-                "INSERT OR IGNORE INTO admins (username, password_hash, created_at) VALUES (?, ?, ?)",
-                (username, password_hash, _now()),
+                "INSERT OR IGNORE INTO admins VALUES (?, ?, ?)", (username, new_user_handle(), _now())
             )
         return cur.rowcount == 1
 
+    @staticmethod
+    def _admin(row: sqlite3.Row | None) -> Admin | None:
+        return None if row is None else Admin(row["username"], row["user_handle"])
+
     def admin(self, username: str) -> Admin | None:
-        row = self.conn.execute("SELECT * FROM admins WHERE username = ?", (username,)).fetchone()
-        if row is None:
-            return None
-        return Admin(
-            row["username"], row["password_hash"], row["totp_secret"],
-            bool(row["totp_enabled"]), row["totp_last_step"],
-        )
+        return self._admin(self.conn.execute("SELECT * FROM admins WHERE username = ?", (username,)).fetchone())
+
+    def admin_by_handle(self, user_handle: str) -> Admin | None:
+        row = self.conn.execute("SELECT * FROM admins WHERE user_handle = ?", (user_handle,)).fetchone()
+        return self._admin(row)
 
     def admin_names(self) -> list[str]:
         return [r[0] for r in self.conn.execute("SELECT username FROM admins ORDER BY username")]
 
-    def set_admin_password(self, username: str, password_hash: str) -> bool:
-        with self.conn:
-            cur = self.conn.execute(
-                "UPDATE admins SET password_hash = ? WHERE username = ?", (password_hash, username)
-            )
-        return cur.rowcount == 1
-
-    def set_admin_totp(self, username: str, secret: str | None, enabled: bool) -> bool:
-        with self.conn:
-            cur = self.conn.execute(
-                "UPDATE admins SET totp_secret = ?, totp_enabled = ?, totp_last_step = NULL "
-                "WHERE username = ?",
-                (secret, int(enabled), username),
-            )
-        return cur.rowcount == 1
-
-    def use_totp_step(self, username: str, step: int) -> bool:
-        """Record `step` as used; False if it (or a later one) was used already."""
-        with self.conn:
-            cur = self.conn.execute(
-                "UPDATE admins SET totp_last_step = ? WHERE username = ? "
-                "AND (totp_last_step IS NULL OR totp_last_step < ?)",
-                (step, username, step),
-            )
-        return cur.rowcount == 1
-
     def remove_admin(self, username: str) -> bool:
         with self.conn:
             cur = self.conn.execute("DELETE FROM admins WHERE username = ?", (username,))
-            self.conn.execute("DELETE FROM sessions WHERE username = ?", (username,))
+            for table in ("sessions", "passkeys", "enrollment_tokens"):
+                self.conn.execute(f"DELETE FROM {table} WHERE username = ?", (username,))
         return cur.rowcount == 1
+
+    # --- admin panel: passkeys and enrollment links -------------------------
+
+    @staticmethod
+    def _passkey(row: sqlite3.Row) -> Passkey:
+        return Passkey(
+            row["credential_id"], row["username"], bytes(row["public_key"]), row["sign_count"],
+            tuple(json.loads(row["transports"])), row["label"], row["created_at"], row["last_used_at"],
+        )
+
+    def add_passkey(
+        self, credential_id: str, username: str, public_key: bytes, sign_count: int,
+        transports: list[str], label: str,
+    ) -> bool:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO passkeys VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+                (credential_id, username, public_key, sign_count, json.dumps(transports), label, _now()),
+            )
+        return cur.rowcount == 1
+
+    def passkey(self, credential_id: str) -> Passkey | None:
+        row = self.conn.execute("SELECT * FROM passkeys WHERE credential_id = ?", (credential_id,)).fetchone()
+        return None if row is None else self._passkey(row)
+
+    def passkeys(self, username: str) -> list[Passkey]:
+        rows = self.conn.execute(
+            "SELECT * FROM passkeys WHERE username = ? ORDER BY created_at, rowid", (username,)
+        )
+        return [self._passkey(r) for r in rows]
+
+    def use_passkey(self, credential_id: str, sign_count: int, now: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE credential_id = ?",
+                (sign_count, now, credential_id),
+            )
+
+    def remove_passkey(self, username: str, credential_id: str) -> bool:
+        """Remove one of `username`'s passkeys, unless it is their last."""
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM passkeys WHERE username = ? AND credential_id = ? "
+                "AND (SELECT COUNT(*) FROM passkeys WHERE username = ?) > 1",
+                (username, credential_id, username),
+            )
+        return cur.rowcount == 1
+
+    def remove_passkeys(self, username: str) -> int:
+        with self.conn:
+            return self.conn.execute("DELETE FROM passkeys WHERE username = ?", (username,)).rowcount
+
+    def set_enrollment_token(self, username: str, token_hash: str, expires_at: str) -> None:
+        """Make `token_hash` the admin's only enrollment link."""
+        with self.conn:
+            self.conn.execute("DELETE FROM enrollment_tokens WHERE username = ?", (username,))
+            self.conn.execute(
+                "INSERT INTO enrollment_tokens VALUES (?, ?, ?)", (token_hash, username, expires_at)
+            )
+
+    def enrollment_token(self, token_hash: str, now: str) -> str | None:
+        """The admin an unexpired enrollment token belongs to."""
+        row = self.conn.execute(
+            "SELECT username FROM enrollment_tokens WHERE token_hash = ? AND expires_at > ?",
+            (token_hash, now),
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def delete_enrollment_token(self, token_hash: str) -> bool:
+        with self.conn:
+            return self.conn.execute(
+                "DELETE FROM enrollment_tokens WHERE token_hash = ?", (token_hash,)
+            ).rowcount == 1
 
     def add_session(self, token_hash: str, username: str, stage: str, csrf: str, now: str) -> None:
         with self.conn:

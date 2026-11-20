@@ -1,92 +1,72 @@
-"""Admin panel authentication: passwords, TOTP, sessions and login rate limiting.
+"""Admin panel authentication: passkeys, sessions, enrollment links and rate limiting.
 
-Discord-free and HTTP-free; `web` turns these results into cookies and pages.
+Discord-free and HTTP-free; `web` turns these results into cookies and JSON.
 
-A login is two steps. The password starts a short-lived partial session (stage
-`totp`, or `enroll` for an admin who has no authenticator yet); a valid code
-replaces it with a full session under a new token, so a token seen before the
-second factor is never one that grants access.
+Admins sign in with a passkey (WebAuthn) and nothing else. Every ceremony requires
+user verification (a fingerprint, face or device PIN), so a passkey is two factors on
+its own: the device, and the person unlocking it. Without that flag it would be one.
+
+An admin's first passkey comes from a one-time enrollment link made on the host
+(`python -m wordlebot admin add|enroll NAME`), because accounts are CLI-only and
+registering a passkey needs a browser. Further passkeys are added from the Account
+page, after confirming with an existing one, so a stolen session can't quietly add
+an attacker's passkey.
+
+Challenges are kept in memory, single-use and short-lived. The browser sends each
+back inside the signed client data, which is how a response is matched to its
+challenge; a restart only means pressing the button again.
 """
 
 from __future__ import annotations
 
-import asyncio
 import base64
-import functools
 import hashlib
-import hmac
+import json
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
-import pyotp
-import segno
+from webauthn import (
+    generate_authentication_options,
+    generate_registration_options,
+    options_to_json,
+    verify_authentication_response,
+    verify_registration_response,
+)
+from webauthn.helpers import base64url_to_bytes, bytes_to_base64url, parse_authentication_credential_json
+from webauthn.helpers.exceptions import WebAuthnException
+from webauthn.helpers.structs import (
+    AuthenticatorSelectionCriteria,
+    AuthenticatorTransport,
+    PublicKeyCredentialDescriptor,
+    ResidentKeyRequirement,
+    UserVerificationRequirement,
+)
 
 from .config import WebConfig
-from .db import Admin, Database, Session
+from .db import Database, Passkey, Session
 
-ISSUER = "wordlebot"
-MIN_PASSWORD_LENGTH = 12
-MAX_PASSWORD_LENGTH = 1024  # scrypt hashes anything, but don't let a request make it work hard
-PARTIAL_SESSION = timedelta(minutes=5)  # time allowed between the password and the code
-TOTP_PERIOD = 30
-TOTP_DRIFT_STEPS = 1  # accept the previous and next code too, for clock drift
+RP_NAME = "wordlebot"
+CHALLENGE_LIFETIME = timedelta(minutes=5)
+ENROLLMENT_LIFETIME = timedelta(hours=24)
+MAX_PENDING = 1000  # outstanding challenges kept; the login button is unauthenticated
+LABEL_MAX = 64
 
-STAGE_TOTP = "totp"
-STAGE_ENROLL = "enroll"
 STAGE_FULL = "full"
 
-# scrypt parameters (n=2^15, r=8 uses 32 MiB). Stored with each hash, so they can be
-# raised later without invalidating existing passwords.
-_SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2**15, 8, 1
-_SCRYPT_MAXMEM = 64 * 1024 * 1024
+LOGIN = "login"
+REAUTH = "reauth"
+REGISTER = "register"
 
+LOCKED_OUT = "Too many failed attempts. Try again later."
+BAD_PASSKEY = "That passkey wasn't accepted. Try again, or use another one."
+BAD_LINK = "This enrollment link has expired or was already used. Ask for a new one."
+NOT_REGISTERED = "The passkey couldn't be registered. Try again."
 
-def _b64(data: bytes) -> str:
-    return base64.b64encode(data).decode()
-
-
-def hash_password(password: str) -> str:
-    salt = secrets.token_bytes(16)
-    digest = hashlib.scrypt(
-        password.encode(), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, maxmem=_SCRYPT_MAXMEM
-    )
-    return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${_b64(salt)}${_b64(digest)}"
-
-
-def verify_password(password: str, stored: str) -> bool:
-    try:
-        scheme, n, r, p, salt, expected = stored.split("$")
-        if scheme != "scrypt":
-            return False
-        digest = hashlib.scrypt(
-            password.encode(),
-            salt=base64.b64decode(salt),
-            n=int(n),
-            r=int(r),
-            p=int(p),
-            maxmem=_SCRYPT_MAXMEM,
-        )
-    except (ValueError, TypeError):
-        return False
-    return hmac.compare_digest(digest, base64.b64decode(expected))
-
-
-@functools.cache
-def _dummy_hash() -> str:
-    """Checked against when the username is unknown, so a wrong name takes as long as
-    a wrong password and response times don't reveal which admins exist."""
-    return hash_password(secrets.token_urlsafe(16))
-
-
-def password_problem(password: str) -> str | None:
-    """Why `password` can't be used, or None."""
-    if len(password) < MIN_PASSWORD_LENGTH:
-        return f"Passwords must be at least {MIN_PASSWORD_LENGTH} characters."
-    if len(password) > MAX_PASSWORD_LENGTH:
-        return f"Passwords must be at most {MAX_PASSWORD_LENGTH} characters."
-    return None
+# Malformed or forged responses: the library's own errors, and bad base64 or JSON.
+_REJECTED = (WebAuthnException, ValueError, KeyError, TypeError, AttributeError)
 
 
 def valid_username(username: str) -> bool:
@@ -101,20 +81,23 @@ def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+def _client_challenge(credential: dict[str, Any]) -> bytes:
+    """The challenge a browser response answers, from its (not yet verified) client data."""
+    raw = base64.urlsafe_b64decode(credential["response"]["clientDataJSON"] + "==")
+    return base64url_to_bytes(json.loads(raw)["challenge"])
+
+
+def clean_label(label: str, fallback: str) -> str:
+    label = " ".join(label.split())[:LABEL_MAX]
+    return label if label and label.isprintable() else fallback
+
+
 @dataclass(frozen=True)
 class LoginStep:
-    """The outcome of one login step. `token` is set when a session was created."""
+    """The outcome of a sign-in or enrollment. `token` is set when a session was created."""
 
     token: str | None = None
-    stage: str | None = None
     error: str | None = None
-
-
-@dataclass(frozen=True)
-class Enrollment:
-    secret: str
-    uri: str
-    qr_svg: str  # inline <svg>, so the page needs no image source beyond itself
 
 
 @dataclass(frozen=True)
@@ -135,9 +118,11 @@ class CurrentSession:
         return self.session.csrf_token
 
 
-LOCKED_OUT = "Too many failed attempts. Try again later."
-BAD_LOGIN = "Wrong username or password."
-BAD_CODE = "That code didn't work. Codes can't be reused; wait for the next one."
+@dataclass(frozen=True)
+class _Pending:
+    purpose: str
+    username: str | None
+    expires: datetime
 
 
 class Auth:
@@ -150,17 +135,26 @@ class Auth:
         self.db = db
         self.config = config
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self._pending: dict[bytes, _Pending] = {}
+
+    @property
+    def rp_id(self) -> str:
+        return self.config.domain
+
+    @property
+    def origin(self) -> str:
+        return f"https://{self.config.domain}"
 
     # --- rate limiting -----------------------------------------------------
 
     def _keys(self, username: str, address: str) -> list[str]:
-        return [f"user:{username.casefold()}", f"ip:{address}"]
-
-    def _window_start(self, now: datetime) -> str:
-        return _iso(now - timedelta(minutes=self.config.login_lockout_minutes))
+        keys = [f"ip:{address}"]
+        if username:
+            keys.append(f"user:{username.casefold()}")
+        return keys
 
     def locked_out(self, username: str, address: str) -> bool:
-        since = self._window_start(self.clock())
+        since = _iso(self.clock() - timedelta(minutes=self.config.login_lockout_minutes))
         return any(
             len(self.db.login_failures_since(key, since)) >= self.config.login_max_failures
             for key in self._keys(username, address)
@@ -176,10 +170,10 @@ class Auth:
 
     # --- sessions ----------------------------------------------------------
 
-    def _new_session(self, username: str, stage: str) -> str:
+    def _new_session(self, username: str) -> str:
         token = secrets.token_urlsafe(32)
         now = _iso(self.clock())
-        self.db.add_session(_token_hash(token), username, stage, secrets.token_urlsafe(32), now)
+        self.db.add_session(_token_hash(token), username, STAGE_FULL, secrets.token_urlsafe(32), now)
         return token
 
     def session(self, token: str | None, touch: bool = True) -> CurrentSession | None:
@@ -193,13 +187,10 @@ class Auth:
         now = self.clock()
         created = datetime.fromisoformat(session.created_at)
         seen = datetime.fromisoformat(session.last_seen_at)
-        lifetime = (
-            timedelta(hours=self.config.session_hours) if session.stage == STAGE_FULL else PARTIAL_SESSION
-        )
-        admin = self.db.admin(session.username)
         if (
-            admin is None
-            or now >= created + lifetime
+            session.stage != STAGE_FULL
+            or self.db.admin(session.username) is None
+            or now >= created + timedelta(hours=self.config.session_hours)
             or now >= seen + timedelta(minutes=self.config.session_idle_minutes)
         ):
             self.db.delete_session(key)
@@ -221,99 +212,232 @@ class Auth:
             _iso(now - timedelta(minutes=self.config.session_idle_minutes)),
         )
 
-    # --- login -------------------------------------------------------------
+    # --- challenges --------------------------------------------------------
 
-    async def login(self, username: str, password: str, address: str) -> LoginStep:
-        """Check a password; on success start a partial session (stage totp or enroll)."""
-        username = username.strip()
-        self.prune_sessions()
-        if self.locked_out(username, address):
-            self.db.audit(username, "login_refused", "locked out", address=address)
-            return LoginStep(error=LOCKED_OUT)
-        admin = self.db.admin(username) if valid_username(username) else None
-        password = password[:MAX_PASSWORD_LENGTH]
-        # scrypt takes tens of milliseconds; keep the event loop (and Discord) running.
-        ok = await asyncio.to_thread(
-            verify_password, password, admin.password_hash if admin else _dummy_hash()
+    def _challenge(self, purpose: str, username: str | None) -> bytes:
+        now = self.clock()
+        for key in [k for k, p in self._pending.items() if p.expires <= now]:
+            del self._pending[key]
+        while len(self._pending) >= MAX_PENDING:
+            del self._pending[next(iter(self._pending))]  # oldest first
+        challenge = secrets.token_bytes(32)
+        self._pending[challenge] = _Pending(purpose, username, now + CHALLENGE_LIFETIME)
+        return challenge
+
+    def _take(self, credential: dict[str, Any], purpose: str, username: str | None) -> bytes | None:
+        """Spend the challenge `credential` answers, if it is live and was issued for
+        this purpose (and admin). A challenge is spent even when that check fails."""
+        challenge = _client_challenge(credential)
+        pending = self._pending.pop(challenge, None)
+        if pending is None or pending.expires <= self.clock():
+            return None
+        if pending.purpose != purpose or pending.username != username:
+            return None
+        return challenge
+
+    @property
+    def _timeout_ms(self) -> int:
+        return int(CHALLENGE_LIFETIME.total_seconds() * 1000)
+
+    @staticmethod
+    def _descriptor(passkey: Passkey) -> PublicKeyCredentialDescriptor:
+        transports = []
+        for name in passkey.transports:
+            try:
+                transports.append(AuthenticatorTransport(name))
+            except ValueError:
+                pass  # a transport this library doesn't know; it's only a hint
+        return PublicKeyCredentialDescriptor(id=base64url_to_bytes(passkey.credential_id), transports=transports)
+
+    def _request_options(self, purpose: str, username: str | None) -> dict[str, Any]:
+        allowed = [self._descriptor(p) for p in self.db.passkeys(username)] if username else None
+        options = generate_authentication_options(
+            rp_id=self.rp_id,
+            challenge=self._challenge(purpose, username),
+            timeout=self._timeout_ms,
+            allow_credentials=allowed,
+            user_verification=UserVerificationRequirement.REQUIRED,
         )
-        if admin is None or not ok:
-            self._fail(username, address, "login_failed")
-            return LoginStep(error=BAD_LOGIN)
-        if not admin.totp_enabled:
-            if admin.totp_secret is None:
-                self.db.set_admin_totp(admin.username, pyotp.random_base32(), enabled=False)
-            return LoginStep(self._new_session(admin.username, STAGE_ENROLL), STAGE_ENROLL)
-        return LoginStep(self._new_session(admin.username, STAGE_TOTP), STAGE_TOTP)
+        return json.loads(options_to_json(options))
 
-    def _check_code(self, admin: Admin, code: str) -> bool:
-        """Whether `code` is valid now and unused; marks its time step used."""
-        code = "".join(code.split())
-        if admin.totp_secret is None or not (len(code) == 6 and code.isdigit()):
-            return False
-        totp = pyotp.TOTP(admin.totp_secret, interval=TOTP_PERIOD)
-        now = self.clock().timestamp()
-        for drift in range(-TOTP_DRIFT_STEPS, TOTP_DRIFT_STEPS + 1):
-            moment = now + drift * TOTP_PERIOD
-            if hmac.compare_digest(totp.at(moment), code):
-                return self.db.use_totp_step(admin.username, int(moment // TOTP_PERIOD))
-        return False
-
-    def _second_factor(self, current: CurrentSession, code: str, address: str, stage: str) -> LoginStep:
-        if current.stage != stage:
-            return LoginStep(error="Start again from the login page.")
-        username = current.username
-        if self.locked_out(username, address):
-            return LoginStep(error=LOCKED_OUT)
+    def _creation_options(self, username: str) -> dict[str, Any]:
         admin = self.db.admin(username)
-        if admin is None or not self._check_code(admin, code):
-            self._fail(username, address, "totp_failed")
-            return LoginStep(error=BAD_CODE)
-        if stage == STAGE_ENROLL:
-            self.db.set_admin_totp(username, admin.totp_secret, enabled=True)
-            # set_admin_totp clears the replay guard; this code stays spent.
-            self._check_code(self.db.admin(username), code)  # type: ignore[arg-type]
-            self.db.audit(username, "totp_enrolled", "", address=address)
-        self.logout(current.token)
-        self.db.clear_login_failures(self._keys(username, address))
-        self.db.audit(username, "login", "", address=address)
-        return LoginStep(self._new_session(username, STAGE_FULL), STAGE_FULL)
-
-    def verify_totp(self, current: CurrentSession, code: str, address: str) -> LoginStep:
-        return self._second_factor(current, code, address, STAGE_TOTP)
-
-    def enrollment(self, current: CurrentSession) -> Enrollment | None:
-        """The authenticator setup for a session in the enroll stage."""
-        if current.stage != STAGE_ENROLL:
-            return None
-        admin = self.db.admin(current.username)
-        if admin is None or admin.totp_secret is None:
-            return None
-        uri = pyotp.TOTP(admin.totp_secret, interval=TOTP_PERIOD).provisioning_uri(
-            name=admin.username, issuer_name=ISSUER
+        assert admin is not None
+        options = generate_registration_options(
+            rp_id=self.rp_id,
+            rp_name=RP_NAME,
+            user_name=username,
+            user_id=base64url_to_bytes(admin.user_handle),
+            challenge=self._challenge(REGISTER, username),
+            timeout=self._timeout_ms,
+            authenticator_selection=AuthenticatorSelectionCriteria(
+                resident_key=ResidentKeyRequirement.REQUIRED,
+                user_verification=UserVerificationRequirement.REQUIRED,
+            ),
+            exclude_credentials=[self._descriptor(p) for p in self.db.passkeys(username)],
         )
-        svg = segno.make(uri, error="m").svg_inline(scale=5, dark="#000", light="#fff")
-        return Enrollment(admin.totp_secret, uri, svg)
+        return json.loads(options_to_json(options))
 
-    def confirm_enrollment(self, current: CurrentSession, code: str, address: str) -> LoginStep:
-        return self._second_factor(current, code, address, STAGE_ENROLL)
+    def _assert(
+        self, credential: Any, purpose: str, username: str | None
+    ) -> tuple[Passkey | None, str]:
+        """Check a sign-in response. Returns the passkey used (None if refused) and the
+        admin it claimed to be, as far as known, for the failure count."""
+        claimed = username or ""
+        try:
+            challenge = self._take(credential, purpose, username)
+            parsed = parse_authentication_credential_json(credential)
+            passkey = self.db.passkey(bytes_to_base64url(parsed.raw_id))
+            if passkey is not None:
+                claimed = passkey.username
+            if challenge is None or passkey is None:
+                return None, claimed
+            admin = self.db.admin(passkey.username)
+            if admin is None or (username is not None and passkey.username != username):
+                return None, claimed
+            handle = parsed.response.user_handle
+            if handle is not None and bytes_to_base64url(handle) != admin.user_handle:
+                return None, claimed
+            verified = verify_authentication_response(
+                credential=parsed,
+                expected_challenge=challenge,
+                expected_rp_id=self.rp_id,
+                expected_origin=self.origin,
+                credential_public_key=passkey.public_key,
+                credential_current_sign_count=passkey.sign_count,
+                require_user_verification=True,
+            )
+        except _REJECTED:
+            return None, claimed
+        self.db.use_passkey(passkey.credential_id, verified.new_sign_count, _iso(self.clock()))
+        return passkey, passkey.username
 
-    async def change_password(self, current: CurrentSession, old: str, new: str, address: str) -> str | None:
-        """Change the session user's password; returns an error, or None on success.
+    def _register(self, username: str, credential: Any, label: str) -> Passkey | None:
+        try:
+            challenge = self._take(credential, REGISTER, username)
+            if challenge is None:
+                return None
+            verified = verify_registration_response(
+                credential=credential,
+                expected_challenge=challenge,
+                expected_rp_id=self.rp_id,
+                expected_origin=self.origin,
+                require_user_verification=True,
+            )
+            transports = [t for t in credential["response"].get("transports") or [] if isinstance(t, str)]
+        except _REJECTED:
+            return None
+        credential_id = bytes_to_base64url(verified.credential_id)
+        label = clean_label(label, f"Passkey {len(self.db.passkeys(username)) + 1}")
+        if not self.db.add_passkey(
+            credential_id, username, verified.credential_public_key, verified.sign_count,
+            transports[:8], label,
+        ):
+            return None  # already registered (to anyone)
+        return self.db.passkey(credential_id)
 
-        Every other session of that admin is ended.
+    # --- sign-in -----------------------------------------------------------
+
+    def login_options(self, address: str) -> dict[str, Any] | None:
+        """Options for `navigator.credentials.get`, or None while the address is locked out.
+
+        No username: the browser offers whichever passkeys it has for this site.
         """
-        admin = self.db.admin(current.username)
-        if admin is None:
-            return "Unknown admin."
-        if self.locked_out(admin.username, address):
+        if self.locked_out("", address):
+            return None
+        return self._request_options(LOGIN, None)
+
+    def login(self, credential: Any, address: str) -> LoginStep:
+        self.prune_sessions()
+        if self.locked_out("", address):
+            self.db.audit("", "login_refused", "locked out", address=address)
+            return LoginStep(error=LOCKED_OUT)
+        passkey, claimed = self._assert(credential, LOGIN, None)
+        if passkey is None:
+            self._fail(claimed, address, "login_failed")
+            return LoginStep(error=BAD_PASSKEY)
+        if self.locked_out(passkey.username, address):
+            self.db.audit(passkey.username, "login_refused", "locked out", address=address)
+            return LoginStep(error=LOCKED_OUT)
+        self.db.clear_login_failures(self._keys(passkey.username, address))
+        self.db.audit(passkey.username, "login", f"passkey {passkey.label}", address=address)
+        return LoginStep(self._new_session(passkey.username))
+
+    # --- enrollment links ----------------------------------------------------
+
+    def issue_enrollment(self, username: str) -> str:
+        """A new one-time link token for `username`; it replaces any earlier one."""
+        token = secrets.token_urlsafe(32)
+        expires = _iso(self.clock() + ENROLLMENT_LIFETIME)
+        self.db.set_enrollment_token(username, _token_hash(token), expires)
+        return token
+
+    def enrollment_user(self, token: str) -> str | None:
+        """The admin a live enrollment token belongs to."""
+        return self.db.enrollment_token(_token_hash(token), _iso(self.clock()))
+
+    def enroll_options(self, token: str, address: str) -> dict[str, Any] | None:
+        if self.locked_out("", address):
+            return None
+        username = self.enrollment_user(token)
+        return None if username is None else self._creation_options(username)
+
+    def enroll(self, token: str, credential: Any, label: str, address: str) -> LoginStep:
+        """Register a passkey through an enrollment link, spend the link, and sign in."""
+        if self.locked_out("", address):
+            return LoginStep(error=LOCKED_OUT)
+        username = self.enrollment_user(token)
+        if username is None:
+            self._fail("", address, "enroll_failed")
+            return LoginStep(error=BAD_LINK)
+        passkey = self._register(username, credential, label)
+        if passkey is None:
+            self._fail(username, address, "enroll_failed")
+            return LoginStep(error=NOT_REGISTERED)
+        self.db.delete_enrollment_token(_token_hash(token))
+        self.db.audit(username, "passkey_registered", f"{passkey.label} (enrollment link)", address=address)
+        self.db.clear_login_failures(self._keys(username, address))
+        self.db.audit(username, "login", f"passkey {passkey.label}", address=address)
+        return LoginStep(self._new_session(username))
+
+    # --- account: managing your passkeys ---------------------------------------
+
+    def passkeys(self, current: CurrentSession) -> list[Passkey]:
+        return self.db.passkeys(current.username)
+
+    def add_options(self, current: CurrentSession, address: str) -> dict[str, Any] | None:
+        """The first step of adding a passkey: `{"reauth": ...}` to confirm with an
+        existing passkey, or `{"create": ...}` straight away for an admin who has none
+        (signed in before passkeys, or since reset). None while locked out."""
+        if self.locked_out(current.username, address):
+            return None
+        if self.db.passkeys(current.username):
+            return {"reauth": self._request_options(REAUTH, current.username)}
+        return {"create": self._creation_options(current.username)}
+
+    def reauth(self, current: CurrentSession, credential: Any, address: str) -> dict[str, Any] | str:
+        """Confirm with an existing passkey; returns `{"create": ...}` or an error."""
+        if self.locked_out(current.username, address):
             return LOCKED_OUT
-        ok = await asyncio.to_thread(verify_password, old[:MAX_PASSWORD_LENGTH], admin.password_hash)
-        if not ok:
-            self._fail(admin.username, address, "password_change_failed")
-            return "The current password is wrong."
-        if problem := password_problem(new):
-            return problem
-        self.db.set_admin_password(admin.username, await asyncio.to_thread(hash_password, new))
-        self.db.delete_sessions(admin.username, keep=_token_hash(current.token))
-        self.db.audit(admin.username, "password_changed", "other sessions ended", address=address)
+        passkey, _ = self._assert(credential, REAUTH, current.username)
+        if passkey is None:
+            self._fail(current.username, address, "reauth_failed")
+            return BAD_PASSKEY
+        return {"create": self._creation_options(current.username)}
+
+    def add_passkey(self, current: CurrentSession, credential: Any, label: str, address: str) -> str | None:
+        """Register a passkey for the signed-in admin; returns an error, or None."""
+        passkey = self._register(current.username, credential, label)
+        if passkey is None:
+            return NOT_REGISTERED
+        self.db.audit(current.username, "passkey_registered", passkey.label, address=address)
+        return None
+
+    def remove_passkey(self, current: CurrentSession, credential_id: str, address: str) -> str | None:
+        passkey = self.db.passkey(credential_id)
+        if passkey is None or passkey.username != current.username:
+            return "No such passkey."
+        if not self.db.remove_passkey(current.username, credential_id):
+            return "You can't remove your only passkey."
+        self.db.audit(current.username, "passkey_removed", passkey.label, address=address)
         return None

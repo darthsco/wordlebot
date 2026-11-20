@@ -6,6 +6,19 @@ What counts as a breaking change: anything that makes an operator or player chan
 
 ## [Unreleased]
 
+### Added
+
+- Admin panel: `[web] domain`, the panel's host name, which passkeys are tied to. It is required when the panel is enabled. The Docker setup fills it from `PANEL_DOMAIN` via the new `WORDLEBOT_WEB_DOMAIN` variable.
+- Admin panel: the Account page lists your passkeys, adds one for another device after you confirm with an existing one, and removes any but the last.
+
+### Changed
+
+- **Breaking:** admin panel sign-in uses passkeys instead of a password and an authenticator code. Every sign-in requires user verification (fingerprint, face or device PIN). `admin add NAME` now prints a one-time enrollment link (valid 24 hours) for registering the admin's first passkey, instead of asking for a password. Existing admins are kept without a passkey: give each one a link with `admin enroll NAME`. See [Upgrading an existing install](README.md#upgrading-an-existing-install).
+
+### Removed
+
+- **Breaking:** panel passwords and authenticator codes, with the `admin passwd` and `admin reset-2fa` commands. `admin enroll NAME` issues a new enrollment link, and `admin reset-passkeys NAME` removes an admin's passkeys, signs them out and issues one.
+
 ## [0.4.0] - 2026-11-18
 
 ### Added

@@ -27,7 +27,7 @@ A Discord bot for friendly Wordle competition. Every evening it posts **tomorrow
 
 - **Leaderboards** for daily, rolling weekly, monthly and all-time. A failed puzzle (X/6) counts as 7. Each board has a configurable minimum number of games to be ranked (defaults: 3 weekly, 7 monthly, 5 all-time; early in a week or month the minimum is capped at the puzzles so far). Players below it are listed under the board, unranked. Ties share a rank.
 - **Golf:** every puzzle is a par-4 hole, and 18 in a row are a par-72 round, counted from the first puzzle the bot picked a starter for. Strokes are guesses; a failed hole (X) or one you didn't play (or that didn't verify) scores 7, like a fail. At 08:00 the morning after each front nine, the bot posts the round's leaderboard and hole-by-hole card. The morning after the 18th hole it posts the final and declares the winner (players tied for the lowest total are co-champions), and a new round begins. The cards show the top 10 players (everyone is on the leaderboard). The evening starter post also @mentions anyone in the current round who hasn't yet shared a result for today's hole. `[golf]` turns it off, moves the post time, and sets what happens to a missed post, to large groups and to scores edited after a round was posted.
-- **Admin panel (optional):** a two-factor, HTTPS-only web panel for the dashboard, rerolls, score moderation, live config edits and an audit log. See [Admin panel](#admin-panel-optional).
+- **Admin panel (optional):** a passkey-only, HTTPS-only web panel for the dashboard, rerolls, score moderation, live config edits and an audit log. See [Admin panel](#admin-panel-optional).
 - **No pings:** the bot never mentions anyone, and display names are escaped so they can't ping or break formatting.
 
 ## Slash commands
@@ -181,30 +181,31 @@ A web control panel served by the bot itself, for admins only. It is off by defa
 - **Golf:** when golf is enabled, the full leaderboard of the current round (through yesterday's puzzle, as `/wordlebot golf` shows it) and of every earlier round, newest first. Unlike the posted cards, it lists everyone, and each round's hole-by-hole scorecard expands below its leaderboard.
 - **Config:** edit the settings that can change while the bot runs: schedule time and offset, selection, scores, `fail_score`, `admin_role_ids` and announcements. They take effect at once and are stored as overrides in the database on top of `config.toml`, which stays read-only. Each overridden setting can be reset to the file's value. The rest (guild and channel, timezone, game rules, paths, the solution source, `[web]`) are shown read-only; change those in `config.toml` and restart.
 - **Announcements:** each kind of admin action can post a note in the channel. Each one has its own switch in `[announce]`, all off by default. Notes name the admin but never the reason.
-- **Audit log:** every sign-in, failed sign-in, lockout and admin change, with who, when, from where and why.
+- **Audit log:** every sign-in, failed sign-in, lockout, passkey change and admin change, with who, when, from where and why.
 
 ### Security
 
 - **HTTPS only.** The panel speaks plain HTTP to a reverse proxy (Caddy, included) that holds the certificate. The bot refuses any request that didn't arrive over HTTPS through the proxy, so the panel's port must never be published or reachable by anyone else. The compose file keeps it on the internal network.
-- **Two-factor sign-in is required.** Each admin signs in with a password (12+ characters, stored as a scrypt hash), then a code from an authenticator app. At first sign-in they scan a QR code to set it up. Codes can't be reused.
-- **Sessions** last 12 hours at most and end after 1 hour without activity. Both are configurable in `[web]`. Cookies are `Secure`, `HttpOnly` and `SameSite=Strict`, every form carries a CSRF token, and cross-origin posts are refused. *Sign out everywhere* is on the Account page, and changing your password signs out your other sessions.
-- **Rate limiting:** 5 failed attempts (password or code) for a username, or from an address, lock it out for 15 minutes.
-- **Accounts are managed on the host only**, so a compromised panel login can't create more admins:
+- **Passkeys only.** Admins sign in with a passkey: no username, no password. Every sign-in requires user verification (fingerprint, face or device PIN), so a passkey counts as two factors on its own: the device, and the person unlocking it. Passkeys are tied to the panel's domain (`[web] domain`), so a look-alike site can't use them.
+- **Sessions** last 12 hours at most and end after 1 hour without activity. Both are configurable in `[web]`. Cookies are `Secure`, `HttpOnly` and `SameSite=Strict`, every form carries a CSRF token, and cross-origin posts are refused. *Sign out everywhere* is on the Account page.
+- **More passkeys:** on the Account page, an admin can add a passkey for another device after confirming with one they already have, and remove any but their last. Register two (a phone and a laptop, or a security key), so losing one device doesn't lock you out.
+- **Rate limiting:** 5 refused passkeys for an admin, or from an address, lock it out for 15 minutes.
+- **Accounts are managed on the host only**, so a compromised panel login can't create more admins. Registering a passkey needs a browser, so the CLI prints a one-time **enrollment link** instead. It works once, for 24 hours, and signs the admin in after they register a passkey with it:
 
   ```sh
-  docker compose run --rm wordlebot admin add NAME        # asks for a password
+  docker compose run --rm wordlebot admin add NAME             # prints NAME's enrollment link
   docker compose run --rm wordlebot admin list
-  docker compose run --rm wordlebot admin passwd NAME     # also signs them out
-  docker compose run --rm wordlebot admin reset-2fa NAME  # lost authenticator: set up again at next sign-in
+  docker compose run --rm wordlebot admin enroll NAME          # a new link (keeps their passkeys; replaces an older link)
+  docker compose run --rm wordlebot admin reset-passkeys NAME  # lost every passkey: removes them, signs out, new link
   docker compose run --rm wordlebot admin remove NAME
   ```
 
-  Without Docker, use `.venv/bin/python -m wordlebot admin ...`. Set up two-factor right after adding an admin: until then, anyone with the password could enroll their own authenticator.
+  Without Docker, use `.venv/bin/python -m wordlebot admin ...`. Send the link privately: whoever opens it first registers a passkey for that account.
 
 ### Setting it up
 
 1. Point a DNS name (e.g. `wordlebot.example.com`) at the host, and open ports 80 and 443. Caddy uses them to get and renew a Let's Encrypt certificate, and redirects HTTP to HTTPS.
-2. In `config.toml`, set `enabled = true` under `[web]`. Leave `host` and `port` alone for Docker; the image listens on all interfaces inside the container.
+2. In `config.toml`, set `enabled = true` under `[web]`. Leave `host` and `port` alone for Docker; the image listens on all interfaces inside the container. With Docker, `domain` comes from `PANEL_DOMAIN` below; without it, set `domain` to the panel's host name.
 3. In `.env`, add:
 
    ```sh
@@ -212,8 +213,10 @@ A web control panel served by the bot itself, for admins only. It is off by defa
    PANEL_DOMAIN=wordlebot.example.com
    ```
 
-4. Create an admin: `docker compose run --rm wordlebot admin add NAME`.
-5. Run `docker compose up -d` (or `./update.sh --force`), then open `https://wordlebot.example.com` and sign in.
+4. Run `docker compose up -d` (or `./update.sh --force`).
+5. Create an admin: `docker compose run --rm wordlebot admin add NAME`. Open the link it prints and register a passkey; you're then signed in. Next time, open `https://wordlebot.example.com` and choose *Sign in with a passkey*.
+
+Changing `PANEL_DOMAIN` later invalidates every passkey (they belong to the old domain); give each admin a new link with `admin reset-passkeys NAME`.
 
 If you changed `port` in `[web]`, also set `PANEL_UPSTREAM_PORT` to the same value in `.env`. Certificates live in the `caddy-data` volume; keep it, as Let's Encrypt limits how often a domain can get new ones. To use your own proxy instead of Caddy, make it terminate TLS, set `X-Forwarded-Proto: https`, *replace* any client-sent `X-Forwarded-For` with the client's address, pass the `Host` header through, and keep the bot's port private.
 
@@ -221,6 +224,7 @@ If you changed `port` in `[web]`, also set `PANEL_UPSTREAM_PORT` to the same val
 
 - **Database:** nothing to do. The bot migrates its SQLite database when it starts.
 - **Admin panel:** off until you enable it; see [Admin panel](#admin-panel-optional). A new install of it needs the `web` compose profile and a domain.
+- **Admin panel, from password sign-in (0.4 and earlier) to passkeys:** passwords and authenticator codes are gone. Admins are kept, but have no passkey yet, and the bot logs a warning for each at startup. Give each one an enrollment link with `admin enroll NAME`. An admin still signed in from before can instead add a passkey on the Account page until that session ends. Without Docker, also set `[web] domain` in `config.toml`.
 - **Config:** nothing to add; new settings have defaults. Startup is stricter, though: the bot now refuses to run with an invalid value or with `guild_id`/`channel_id` unset. Weekly and monthly leaderboards now have minimum games (3 and 7); change `min_games_weekly` and `min_games_monthly` if you prefer otherwise.
 - **Update timer:** if you installed the systemd timer with `OnCalendar=*:0/15`, it fires at the same moment as the default 20:00 post. Change that line in `/etc/systemd/system/wordlebot-update.timer` to `OnCalendar=*:7/15`, then run `sudo systemctl daemon-reload && sudo systemctl restart wordlebot-update.timer`.
 - **`update.sh`:** its first run after upgrading does one build-and-up to record the deployed commit, even with no new commits.

@@ -1,14 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
-<form method="post" action="/login/enroll" class="card narrow" hx-boost="false">
-  <h1>Set up two-factor sign-in</h1>
-  <p>Two-factor sign-in is required. Scan this with an authenticator app, then enter the code it shows.</p>
-  <div class="qr">{{ enrollment.qr_svg | safe }}</div>
-  <details><summary>Can't scan it?</summary><p>Enter this key manually: <code class="secret">{{ enrollment.secret }}</code></p></details>
-  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>6-digit code <input name="code" inputmode="numeric" pattern="[0-9 ]{6,7}" autocomplete="one-time-code" required autofocus></label>
-  <button>Confirm and sign in</button>
-  <p class="muted"><a href="/login">Start over</a></p>
-</form>
+<section class="card narrow">
+  {% if enrolling %}
+  <h1>Register a passkey</h1>
+  <p>This link registers a passkey for <strong>{{ enrolling }}</strong> and signs you in. It works once.</p>
+  <p>Your device asks for your fingerprint, face or PIN, and may offer to save the passkey to your password manager or phone.</p>
+  <label>Name for this passkey <input id="passkey-label" maxlength="64" placeholder="e.g. Laptop, Phone" autocomplete="off"></label>
+  <p class="error" role="alert" data-passkey-error></p>
+  <button type="button" data-passkey="enroll" data-url="{{ path }}" data-label="passkey-label">Create passkey</button>
+  <noscript><p class="error">Passkeys need JavaScript; enable it for this site.</p></noscript>
+  {% else %}
+  <h1>Link expired</h1>
+  <p>This enrollment link has expired or was already used. Ask for a new one: <code>python -m wordlebot admin enroll NAME</code> on the host.</p>
+  {% endif %}
+</section>
 {% endblock %}

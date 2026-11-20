@@ -9,8 +9,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "tzdata",  # zoneinfo database for slim container images
     "jinja2>=3.1",  # admin panel templates
-    "pyotp>=2.9",  # admin panel two-factor codes
-    "segno>=1.6",  # admin panel authenticator QR code
+    "webauthn>=2.5",  # admin panel passkeys
 ]
 
 [project.optional-dependencies]

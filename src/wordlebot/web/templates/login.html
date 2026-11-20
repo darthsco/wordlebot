@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
-<form method="post" action="/login" class="card narrow" hx-boost="false">
+<section class="card narrow">
   <h1>Sign in</h1>
-  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-  <label>Username <input name="username" value="{{ username }}" autocomplete="username" required autofocus></label>
-  <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
-  <button>Continue</button>
-</form>
+  <p>Sign in with the passkey you registered for this panel. Your device asks for your fingerprint, face or PIN.</p>
+  <p class="error" role="alert" data-passkey-error></p>
+  <button type="button" data-passkey="login" autofocus>Sign in with a passkey</button>
+  <noscript><p class="error">Passkeys need JavaScript; enable it for this site.</p></noscript>
+  <p class="muted">No passkey yet, or lost them all? Ask for an enrollment link: <code>python -m wordlebot admin enroll NAME</code> on the host.</p>
+</section>
 {% endblock %}

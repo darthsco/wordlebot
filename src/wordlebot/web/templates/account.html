@@ -1,21 +1,45 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Account</h1>
-<form method="post" action="/account/password" class="card narrow">
-  <h2>Change password</h2>
+<section class="card">
+  <h2>Passkeys</h2>
   {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <input type="text" name="username" value="{{ user }}" autocomplete="username" hidden>
-  <label>Current password <input name="old" type="password" autocomplete="current-password" required></label>
-  <label>New password (12+ characters) <input name="new" type="password" autocomplete="new-password" minlength="12" required></label>
-  <label>Repeat new password <input name="repeat" type="password" autocomplete="new-password" minlength="12" required></label>
-  <button>Change password</button>
-</form>
+  {% if passkeys %}
+  <table class="compact">
+    <thead><tr><th>Name</th><th>Added</th><th>Last used</th><th></th></tr></thead>
+    <tbody>
+    {% for passkey in passkeys %}
+    <tr>
+      <td>{{ passkey.label }}</td>
+      <td>{{ passkey.created_at | local }}</td>
+      <td>{{ passkey.last_used_at | local or "never" }}</td>
+      <td>
+        {% if passkeys | length > 1 %}
+        <form method="post" action="/account/passkeys/remove" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="credential_id" value="{{ passkey.credential_id }}">
+          <button class="danger">Remove</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>You have no passkey yet. Add one now: once your session ends, it's the only way to sign in.</p>
+  {% endif %}
+  <h3>Add a passkey</h3>
+  <p class="muted">A second passkey (another device, or a security key) means losing one doesn't lock you out.{% if passkeys %} You confirm with one of your passkeys first.{% endif %}</p>
+  <label>Name <input id="passkey-label" maxlength="64" placeholder="e.g. Phone, Security key" autocomplete="off"></label>
+  <p class="error" role="alert" data-passkey-error></p>
+  <button type="button" data-passkey="add" data-csrf="{{ csrf }}" data-label="passkey-label">Add a passkey</button>
+</section>
 <form method="post" action="/account/logout-all" class="card narrow">
   <h2>Sessions</h2>
   <p>Sign out of the panel on every device, including this one.</p>
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <button class="danger">Sign out everywhere</button>
 </form>
-<p class="muted">Lost your authenticator? Another admin can't reset it; run <code>python -m wordlebot admin reset-2fa {{ user }}</code> on the host.</p>
+<p class="muted">Lost every passkey? Another admin can't help from the panel; run <code>python -m wordlebot admin reset-passkeys {{ user }}</code> on the host for a new enrollment link.</p>
 {% endblock %}

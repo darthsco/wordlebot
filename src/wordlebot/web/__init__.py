@@ -24,7 +24,7 @@ from urllib.parse import urlencode
 import jinja2
 from aiohttp import web
 
-from ..auth import STAGE_ENROLL, STAGE_FULL, STAGE_TOTP, Auth, CurrentSession
+from ..auth import LOCKED_OUT, STAGE_FULL, Auth, CurrentSession
 from .. import golf
 from ..db import Starter
 from ..game import puzzle_number
@@ -125,11 +125,11 @@ class Panel:
         )
         r = app.router
         r.add_get("/login", self.login_page)
+        r.add_post("/login/options", self.login_options)
         r.add_post("/login", self.login)
-        r.add_get("/login/code", self.code_page)
-        r.add_post("/login/code", self.code)
-        r.add_get("/login/enroll", self.enroll_page)
-        r.add_post("/login/enroll", self.enroll)
+        r.add_get("/enroll/{token}", self.enroll_page)
+        r.add_post("/enroll/{token}/options", self.enroll_options)
+        r.add_post("/enroll/{token}", self.enroll)
         r.add_post("/logout", self.logout)
         r.add_get("/", self.dashboard)
         r.add_get("/status", self.status_fragment)
@@ -143,7 +143,10 @@ class Panel:
         r.add_post("/config", self.config_change)
         r.add_get("/audit", self.audit)
         r.add_get("/account", self.account)
-        r.add_post("/account/password", self.change_password)
+        r.add_post("/account/passkeys/options", self.add_passkey_options)
+        r.add_post("/account/passkeys/reauth", self.add_passkey_reauth)
+        r.add_post("/account/passkeys", self.add_passkey)
+        r.add_post("/account/passkeys/remove", self.remove_passkey)
         r.add_post("/account/logout-all", self.logout_all)
         r.add_static("/static", HERE / "static", name="static", append_version=True)
         return app
@@ -196,19 +199,19 @@ class Panel:
         current = self.auth.session(request.cookies.get(SESSION_COOKIE), touch=path != "/status")
         if current is not None:
             request[SESSION_KEY] = current
-        if path.startswith("/static/") or path == "/login":
+        # Signing in and enrolling are the only things done without a session.
+        if path.startswith(("/static/", "/enroll/")) or path in ("/login", "/login/options"):
             return await handler(request)
         if current is None:
             raise self._redirect(request, "/login")
-        if current.stage == STAGE_TOTP and path != "/login/code":
-            raise self._redirect(request, "/login/code")
-        if current.stage == STAGE_ENROLL and path != "/login/enroll":
-            raise self._redirect(request, "/login/enroll")
-        if current.stage == STAGE_FULL and path.startswith("/login/"):
+        if path.startswith("/login/"):
             raise self._redirect(request, "/")
         if request.method == "POST":
-            form = await request.post()
-            sent = str(form.get("csrf", ""))
+            # Forms carry the token as a field; the passkey script sends JSON with a header.
+            if request.content_type == "application/json":
+                sent = request.headers.get("X-CSRF-Token", "")
+            else:
+                sent = str((await request.post()).get("csrf", ""))
             if not hmac.compare_digest(sent.encode(), current.csrf_token.encode()):
                 return web.Response(status=403, text="Invalid form token; reload the page and try again.")
         return await handler(request)
@@ -228,9 +231,8 @@ class Panel:
         return Actor(self._session(request).username, self.address(request))
 
     @staticmethod
-    def _see_other(location: str, token: str | None = None) -> web.Response:
-        """A redirect that sets the session cookie to `token`, or clears it ("")."""
-        response = web.Response(status=303, headers={"Location": location})
+    def _set_session_cookie(response: web.Response, token: str | None) -> web.Response:
+        """Set the session cookie to `token`, clear it (""), or leave it (None)."""
         if token:
             response.set_cookie(
                 SESSION_COOKIE, token, path="/", secure=True, httponly=True, samesite="Strict"
@@ -238,6 +240,26 @@ class Panel:
         elif token == "":
             response.del_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="Strict")
         return response
+
+    @classmethod
+    def _see_other(cls, location: str, token: str | None = None) -> web.Response:
+        """A redirect that sets the session cookie to `token`, or clears it ("")."""
+        return cls._set_session_cookie(web.Response(status=303, headers={"Location": location}), token)
+
+    @staticmethod
+    def _json(data: dict[str, Any], status: int = 200) -> web.Response:
+        return web.json_response(data, status=status)
+
+    @staticmethod
+    async def _json_body(request: web.Request) -> dict[str, Any]:
+        """The posted JSON object (the passkey script's requests), or 400."""
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            body = None
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="Expected a JSON object.")
+        return body
 
     def _flash_next(self, request: web.Request, message: str) -> None:
         self._flash[self._session(request).token] = message
@@ -273,46 +295,44 @@ class Panel:
         current = request.get(SESSION_KEY)
         if current is not None and current.stage == STAGE_FULL:
             raise web.HTTPSeeOther("/")
-        return self.render(request, "login.html", error=None, username="")
+        return self.render(request, "login.html")
+
+    async def login_options(self, request: web.Request) -> web.StreamResponse:
+        options = self.auth.login_options(self.address(request))
+        if options is None:
+            return self._json({"error": LOCKED_OUT}, status=429)
+        return self._json({"get": options})
 
     async def login(self, request: web.Request) -> web.StreamResponse:
-        form = await request.post()
-        username = str(form.get("username", ""))
-        step = await self.auth.login(username, str(form.get("password", "")), self.address(request))
+        body = await self._json_body(request)
+        step = self.auth.login(body.get("credential"), self.address(request))
         if step.token is None:
-            return self.render(request, "login.html", status=401, error=step.error, username=username)
+            return self._json({"error": step.error}, status=401)
         if current := request.get(SESSION_KEY):
             self.auth.logout(current.token)
-        return self._see_other(
-            "/login/enroll" if step.stage == STAGE_ENROLL else "/login/code", step.token
-        )
+        return self._set_session_cookie(self._json({"redirect": "/"}), step.token)
 
-    async def code_page(self, request: web.Request) -> web.StreamResponse:
-        return self.render(request, "code.html", error=None)
+    async def enroll_page(self, request: web.Request) -> web.StreamResponse:
+        username = self.auth.enrollment_user(request.match_info["token"])
+        return self.render(request, "enroll.html", status=200 if username else 404, enrolling=username)
 
-    async def code(self, request: web.Request) -> web.StreamResponse:
-        form = await request.post()
-        step = self.auth.verify_totp(self._session(request), str(form.get("code", "")), self.address(request))
-        if step.token is None:
-            return self.render(request, "code.html", status=401, error=step.error)
-        return self._see_other("/", step.token)
-
-    async def enroll_page(self, request: web.Request, error: str | None = None) -> web.StreamResponse:
-        enrollment = self.auth.enrollment(self._session(request))
-        if enrollment is None:
-            raise web.HTTPSeeOther("/login")
-        return self.render(
-            request, "enroll.html", status=401 if error else 200, error=error, enrollment=enrollment
-        )
+    async def enroll_options(self, request: web.Request) -> web.StreamResponse:
+        options = self.auth.enroll_options(request.match_info["token"], self.address(request))
+        if options is None:
+            return self._json({"error": "This link has expired or was already used."}, status=404)
+        return self._json({"create": options})
 
     async def enroll(self, request: web.Request) -> web.StreamResponse:
-        form = await request.post()
-        step = self.auth.confirm_enrollment(
-            self._session(request), str(form.get("code", "")), self.address(request)
+        body = await self._json_body(request)
+        step = self.auth.enroll(
+            request.match_info["token"], body.get("credential"), str(body.get("label", "")),
+            self.address(request),
         )
         if step.token is None:
-            return await self.enroll_page(request, step.error)
-        return self._see_other("/", step.token)
+            return self._json({"error": step.error}, status=400)
+        if current := request.get(SESSION_KEY):
+            self.auth.logout(current.token)
+        return self._set_session_cookie(self._json({"redirect": "/account"}), step.token)
 
     async def logout(self, request: web.Request) -> web.StreamResponse:
         current = self._session(request)
@@ -549,19 +569,43 @@ class Panel:
         return self.render(request, "audit.html", entries=entries)
 
     async def account(self, request: web.Request, error: str | None = None) -> web.StreamResponse:
-        return self.render(request, "account.html", status=400 if error else 200, error=error)
+        return self.render(
+            request, "account.html", status=400 if error else 200, error=error,
+            passkeys=self.auth.passkeys(self._session(request)),
+        )
 
-    async def change_password(self, request: web.Request) -> web.StreamResponse:
+    async def add_passkey_options(self, request: web.Request) -> web.StreamResponse:
+        options = self.auth.add_options(self._session(request), self.address(request))
+        if options is None:
+            return self._json({"error": LOCKED_OUT}, status=429)
+        return self._json(options)
+
+    async def add_passkey_reauth(self, request: web.Request) -> web.StreamResponse:
+        body = await self._json_body(request)
+        result = self.auth.reauth(self._session(request), body.get("credential"), self.address(request))
+        if isinstance(result, str):
+            return self._json({"error": result}, status=401)
+        return self._json(result)
+
+    async def add_passkey(self, request: web.Request) -> web.StreamResponse:
+        body = await self._json_body(request)
+        error = self.auth.add_passkey(
+            self._session(request), body.get("credential"), str(body.get("label", "")),
+            self.address(request),
+        )
+        if error:
+            return self._json({"error": error}, status=400)
+        self._flash_next(request, "Passkey added.")
+        return self._json({"redirect": "/account"})
+
+    async def remove_passkey(self, request: web.Request) -> web.StreamResponse:
         form = await request.post()
-        new, repeat = str(form.get("new", "")), str(form.get("repeat", ""))
-        if new != repeat:
-            return await self.account(request, "The new passwords don't match.")
-        error = await self.auth.change_password(
-            self._session(request), str(form.get("old", "")), new, self.address(request)
+        error = self.auth.remove_passkey(
+            self._session(request), str(form.get("credential_id", "")), self.address(request)
         )
         if error:
             return await self.account(request, error)
-        self._flash_next(request, "Password changed; your other sessions were signed out.")
+        self._flash_next(request, "Passkey removed.")
         raise web.HTTPSeeOther("/account")
 
     async def logout_all(self, request: web.Request) -> web.StreamResponse:

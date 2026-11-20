@@ -73,9 +73,7 @@ tr.bad-row td { color: var(--bad); }
 .flash { background: var(--flash-bg); border-left: 4px solid var(--accent); padding: 8px 12px; border-radius: 4px; }
 .spoiler { background: var(--text); color: transparent; border-radius: 3px; padding: 0 4px; cursor: pointer; }
 .spoiler:hover, .spoiler:focus { background: transparent; color: inherit; }
-.qr { display: flex; justify-content: center; margin: 12px 0; }
-.qr svg { background: #fff; padding: 8px; border-radius: 6px; max-width: 100%; height: auto; }
-.secret { overflow-wrap: anywhere; }
+[data-passkey-error]:empty { display: none; }
 ul.plain { list-style: none; padding: 0; margin: 0 0 8px; }
 code { font-family: ui-monospace, monospace; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }

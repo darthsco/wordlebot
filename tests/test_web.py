@@ -3,22 +3,19 @@ import re
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-import pyotp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from passkeys import HOST, Authenticator
 from test_bot import Share, make_bot
 from test_golf import ROUND_DONE, score
 from test_service import GOOD_SHARE, SOLUTION, TODAY
 from test_solutions import FakeSource
 
-from wordlebot.auth import Auth, hash_password
+from wordlebot.auth import Auth
 from wordlebot.config import GolfConfig, WebConfig
 from wordlebot.service import REROLL_PREFIX
 from wordlebot.web import SESSION_COOKIE, Panel
-
-HOST = "panel.test"
-PASSWORD = "correct horse battery"
 
 
 class UtcClock:
@@ -66,6 +63,16 @@ class Browser:
         response = await self.client.get(path, headers=self._headers(headers), allow_redirects=False)
         return await self._done(response)
 
+    async def post_json(self, path, body=None, csrf=False, **headers):
+        """A request from the passkey script: JSON, with the CSRF token as a header."""
+        if csrf:
+            headers.setdefault("X-CSRF-Token", self.csrf)
+        response = await self.client.post(
+            path, json=body or {}, headers=self._headers(headers), allow_redirects=False
+        )
+        await self._done(response)
+        return response, (await response.json() if response.content_type == "application/json" else {})
+
     async def post(self, path, data=None, csrf=True, **headers):
         data = dict(data or {})
         if csrf:
@@ -83,26 +90,25 @@ class Env:
         self.service.source = FakeSource({TODAY: SOLUTION})
         self.db = self.service.db
         self.utc = UtcClock()
-        self.auth = Auth(self.db, WebConfig(login_max_failures=3), clock=self.utc)
+        self.auth = Auth(
+            self.db, WebConfig(enabled=True, domain=HOST, login_max_failures=3), clock=self.utc
+        )
         self.panel = Panel(self.service, self.auth, self.bot)
-        self.db.add_admin("ada", hash_password(PASSWORD))
+        self.db.add_admin("ada")
+        self.device = Authenticator()
+        token = self.auth.issue_enrollment("ada")
+        self.auth.enroll(token, self.device.create(self.auth.enroll_options(token, "?")), "Laptop", "?")
 
-    def code(self, username="ada", offset=0):
-        secret = self.db.admin(username).totp_secret
-        return pyotp.TOTP(secret).at(self.utc.now.timestamp() + offset)
-
-    async def login(self, browser, username="ada"):
+    async def try_login(self, browser, device=None, **get):
         await browser.get("/login")
-        response, _ = await browser.post("/login", {"username": username, "password": PASSWORD}, csrf=False)
-        assert response.status == 303
-        if response.headers["Location"] == "/login/enroll":
-            await browser.get("/login/enroll")
-            response, _ = await browser.post("/login/enroll", {"code": self.code(username)})
-        else:
-            await browser.get("/login/code")
-            response, _ = await browser.post("/login/code", {"code": self.code(username)})
-        assert response.status == 303 and response.headers["Location"] == "/"
-        self.utc.advance(seconds=30)  # the next login needs a fresh code
+        response, body = await browser.post_json("/login/options")
+        if response.status != 200:
+            return response, body
+        return await browser.post_json("/login", {"credential": (device or self.device).get(body["get"], **get)})
+
+    async def login(self, browser, device=None):
+        response, body = await self.try_login(browser, device)
+        assert response.status == 200 and body == {"redirect": "/"}, body
         await browser.get("/")
 
 
@@ -123,12 +129,9 @@ def test_plain_http_and_cross_origin_posts_are_refused(tmp_path):
         assert response.status == 403 and "HTTPS required" in text
         response, _ = await browser.get("/login", **{"X-Forwarded-Proto": "http"})
         assert response.status == 403
-        response, text = await browser.post(
-            "/login", {"username": "ada", "password": PASSWORD}, csrf=False, Origin="https://evil.test"
-        )
+        response, text = await browser.post("/login/options", Origin="https://evil.test", csrf=False)
         assert response.status == 403 and "Cross-origin" in text
         # A browser that withholds the origin is believed only on Sec-Fetch-Site.
-        login = {"username": "ada", "password": PASSWORD}
         for origin, fetch_site, allowed in [
             ("null", "same-origin", True),
             (None, "same-origin", True),
@@ -137,7 +140,7 @@ def test_plain_http_and_cross_origin_posts_are_refused(tmp_path):
             (None, None, False),
         ]:
             response, _ = await browser.post(
-                "/login", login, csrf=False, Origin=origin, **{"Sec-Fetch-Site": fetch_site}
+                "/login/options", csrf=False, Origin=origin, **{"Sec-Fetch-Site": fetch_site}
             )
             assert (response.status != 403) is allowed, (origin, fetch_site)
         response, _ = await browser.get("/login")
@@ -152,7 +155,7 @@ def test_plain_http_and_cross_origin_posts_are_refused(tmp_path):
 
 def test_pages_need_a_full_session(tmp_path):
     async def scenario(env, browser):
-        for path in ("/", "/scores", "/config", "/audit", "/account", "/login/code"):
+        for path in ("/", "/scores", "/config", "/audit", "/account"):
             response, _ = await browser.get(path)
             assert response.status == 303 and response.headers["Location"] == "/login", path
         # htmx background requests get a full-page redirect instead.
@@ -162,62 +165,58 @@ def test_pages_need_a_full_session(tmp_path):
     run(tmp_path, scenario)
 
 
-def test_first_login_enrolls_two_factor_then_requires_it(tmp_path):
+def test_an_enrollment_link_registers_a_passkey_and_signs_in(tmp_path):
     async def scenario(env, browser):
-        response, _ = await browser.post("/login", {"username": "ada", "password": PASSWORD}, csrf=False)
-        assert response.headers["Location"] == "/login/enroll"
+        env.db.add_admin("bob")
+        token = env.auth.issue_enrollment("bob")
+        response, text = await browser.get(f"/enroll/{token}")
+        assert response.status == 200 and "for <strong>bob</strong>" in text
+        assert 'data-passkey="enroll"' in text and "/static/passkey.js" in text
+
+        phone = Authenticator()
+        response, body = await browser.post_json(f"/enroll/{token}/options")
+        options = body["create"]
+        assert options["rp"] == {"id": HOST, "name": "wordlebot"}
+        assert options["authenticatorSelection"]["userVerification"] == "required"
+        assert options["authenticatorSelection"]["residentKey"] == "required"
+        response, body = await browser.post_json(
+            f"/enroll/{token}", {"credential": phone.create(options), "label": "Phone"}
+        )
+        assert response.status == 200 and body == {"redirect": "/account"}
         set_cookie = response.headers["Set-Cookie"]
         assert "Secure" in set_cookie and "HttpOnly" in set_cookie and "SameSite=Strict" in set_cookie
-        partial = browser.cookie
+        response, text = await browser.get("/account")
+        assert response.status == 200 and "Sign out bob" in text and "Phone" in text
 
-        # The partial session can't reach the panel.
-        response, _ = await browser.get("/")
-        assert response.headers["Location"] == "/login/enroll"
-        response, text = await browser.get("/login/enroll")
-        assert "<svg" in text and env.db.admin("ada").totp_secret in text
+        # The link worked once.
+        response, text = await browser.get(f"/enroll/{token}")
+        assert response.status == 404 and "Link expired" in text
+        response, body = await browser.post_json(f"/enroll/{token}/options")
+        assert response.status == 404
 
-        response, text = await browser.post("/login/enroll", {"code": "000000"})
-        assert response.status == 401 and "That code didn&#39;t work" in text
-        response, _ = await browser.post("/login/enroll", {"code": env.code()})
-        assert response.status == 303
-        assert browser.cookie != partial  # a new token once both factors passed
-        assert env.db.admin("ada").totp_enabled
-        response, text = await browser.get("/")
-        assert response.status == 200 and "Dashboard" in text
-
-        # The old partial token is dead.
-        browser.cookie = partial
-        response, _ = await browser.get("/")
-        assert response.headers["Location"] == "/login"
-
-        # Second login: password, then a code; a reused code is refused.
-        used = env.code()
-        response, _ = await browser.post("/login", {"username": "ada", "password": PASSWORD}, csrf=False)
-        assert response.headers["Location"] == "/login/code"
-        await browser.get("/login/code")
-        response, _ = await browser.post("/login/code", {"code": used})
-        assert response.status == 401
-        env.utc.advance(seconds=30)
-        response, _ = await browser.post("/login/code", {"code": env.code()})
-        assert response.status == 303 and response.headers["Location"] == "/"
+        # Signing in needs only the passkey.
+        browser.cookie = None
+        await env.login(browser, phone)
+        _, text = await browser.get("/")
+        assert "Sign out bob" in text
 
     env = run(tmp_path, scenario)
     actions = [e.action for e in env.db.audit_entries()]
-    assert actions.count("login") == 2 and "totp_enrolled" in actions and "totp_failed" in actions
+    assert actions.count("login") == 3 and actions.count("passkey_registered") == 2
 
 
-def test_wrong_passwords_lock_out_the_user_and_address(tmp_path):
+def test_a_refused_passkey_counts_towards_a_lockout(tmp_path):
     async def scenario(env, browser):
+        await browser.get("/login")
         for _ in range(3):
-            response, text = await browser.post("/login", {"username": "ada", "password": "nope"}, csrf=False)
-            assert response.status == 401 and "Wrong username or password" in text
-        # Even the right password is refused while locked out, from any address.
+            response, body = await env.try_login(browser, uv=False)
+            assert response.status == 401 and "wasn't accepted" in body["error"]
+        # The admin is locked out from any address, and this address for anyone.
         other = Browser(browser.client, address="198.51.100.9")
-        response, text = await other.post("/login", {"username": "ada", "password": PASSWORD}, csrf=False)
-        assert response.status == 401 and "Too many" in text
-        # The address is locked out for other usernames too.
-        response, text = await browser.post("/login", {"username": "bob", "password": "x"}, csrf=False)
-        assert "Too many" in text
+        response, body = await env.try_login(other)
+        assert response.status == 401 and "Too many" in body["error"]
+        response, body = await browser.post_json("/login/options")
+        assert response.status == 429 and "Too many" in body["error"]
         env.utc.advance(minutes=16)
         await env.login(other)
 
@@ -226,10 +225,16 @@ def test_wrong_passwords_lock_out_the_user_and_address(tmp_path):
     assert actions.count("login_failed") == 3 and "login_locked" in actions and "login" in actions
 
 
-def test_unknown_user_looks_like_a_wrong_password(tmp_path):
+def test_the_login_page_offers_only_a_passkey(tmp_path):
     async def scenario(env, browser):
-        response, text = await browser.post("/login", {"username": "mallory", "password": PASSWORD}, csrf=False)
-        assert response.status == 401 and "Wrong username or password" in text
+        response, text = await browser.get("/login")
+        assert 'data-passkey="login"' in text and "password" not in text.lower()
+        response, _ = await browser.post_json("/login", {"credential": "nonsense"})
+        assert response.status == 401
+        response, _ = await browser.client.post(
+            "/login", data="not json", headers=browser._headers({"Content-Type": "application/json"})
+        ), None
+        assert response.status == 400
 
     run(tmp_path, scenario)
 
@@ -413,25 +418,40 @@ def test_config_edits_apply_at_once_and_reset_to_the_file(tmp_path):
     assert [e.action for e in env.db.audit_entries()][:2] == ["config_reset", "config_set"]
 
 
-def test_change_password_ends_other_sessions(tmp_path):
+def test_account_page_adds_and_removes_passkeys(tmp_path):
     async def scenario(env, browser):
-        other = Browser(browser.client)
-        await env.login(other)
         await env.login(browser)
-        await browser.get("/account")
-        response, text = await browser.post("/account/password", {"old": "wrong", "new": "x" * 12, "repeat": "x" * 12})
-        assert "current password is wrong" in text
-        await browser.get("/account")
-        response, _ = await browser.post(
-            "/account/password", {"old": PASSWORD, "new": "new password 123", "repeat": "new password 123"}
-        )
-        assert response.status == 303
-        response, _ = await browser.get("/")
-        assert response.status == 200
-        response, _ = await other.get("/")
-        assert response.headers["Location"] == "/login"
+        _, text = await browser.get("/account")
+        assert "Laptop" in text and "Remove" not in text  # the only passkey stays
 
-    run(tmp_path, scenario)
+        # JSON posts need the CSRF header too.
+        response, _ = await browser.post_json("/account/passkeys/options")
+        assert response.status == 403
+        response, body = await browser.post_json("/account/passkeys/options", csrf=True)
+        assert set(body) == {"reauth"}
+        response, body = await browser.post_json(
+            "/account/passkeys/reauth", {"credential": env.device.get(body["reauth"])}, csrf=True
+        )
+        phone = Authenticator()
+        response, body = await browser.post_json(
+            "/account/passkeys", {"credential": phone.create(body["create"]), "label": "Phone"}, csrf=True
+        )
+        assert body == {"redirect": "/account"}
+        _, text = await browser.get("/account")
+        assert "Passkey added." in text and text.count(">Remove</button>") == 2
+
+        laptop = env.db.passkeys("ada")[0]
+        response, _ = await browser.post("/account/passkeys/remove", {"credential_id": laptop.credential_id})
+        assert response.status == 303
+        assert [p.label for p in env.db.passkeys("ada")] == ["Phone"]
+        browser.cookie = None
+        response, _ = await env.try_login(browser)  # the laptop's passkey is gone
+        assert response.status == 401
+        await env.login(browser, phone)
+
+    env = run(tmp_path, scenario)
+    actions = [e.action for e in env.db.audit_entries()]
+    assert "passkey_removed" in actions and actions.count("passkey_registered") == 2
 
 
 def test_dashboard_hides_answers_until_they_may_be_shown(tmp_path):
@@ -480,7 +500,7 @@ def test_golf_tab_shows_the_current_round_then_earlier_ones(tmp_path):
     run(tmp_path, scenario, hour=10)
 
 
-@pytest.mark.parametrize("path", ["/static/htmx.min.js", "/static/panel.css"])
+@pytest.mark.parametrize("path", ["/static/htmx.min.js", "/static/panel.css", "/static/passkey.js"])
 def test_static_files_are_served_without_a_session(tmp_path, path):
     async def scenario(env, browser):
         response, _ = await browser.get(path)
